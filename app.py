@@ -59,6 +59,18 @@ def load_data(file_bytes: bytes):
     df_of["iso_year"] = iso_of["year"]
     df_of["iso_week"] = iso_of["week"]
 
+    # --- Feuille des employés (pour afficher le nom des opérateurs) -------------
+    try:
+        df_emp = pd.read_excel(xls, sheet_name="employes")
+        noms = (df_emp["prenom"].fillna("") + " " + df_emp["nom"].fillna("")).str.strip()
+        operateur_map = dict(zip(df_emp["id"].astype(str), noms))
+    except Exception:
+        operateur_map = {}
+
+    df_pointages["operateur"] = (
+        df_pointages["id_operateur"].astype(str).map(operateur_map).fillna(df_pointages["id_operateur"].astype(str))
+    )
+
     return df_pointages, df_of
 
 
@@ -185,18 +197,18 @@ with col_pie1:
         st.info("Aucun pointage sur cette semaine.")
 
 with col_pie2:
-    st.markdown("**Répartition de la durée par ordre de fabrication**")
+    st.markdown("**Répartition du nombre d'heures par opérateur**")
     if not pointages_semaine.empty:
-        data2 = pie_top_n(pointages_semaine, "ordre_fabrication", "Durée h")
-        fig2 = px.pie(data2, names="ordre_fabrication", values="Durée h", hole=0.35)
+        data2 = pie_top_n(pointages_semaine, "operateur", "Durée h")
+        fig2 = px.pie(data2, names="operateur", values="Durée h", hole=0.35)
         fig2.update_traces(textposition="inside", textinfo="percent+label")
-        st.plotly_chart(fig2, use_container_width=True, key="pie_duree_par_of")
+        st.plotly_chart(fig2, use_container_width=True, key="pie_heures_par_operateur")
     else:
         st.info("Aucun pointage sur cette semaine.")
 
 st.caption(
     "ℹ️ Dans le fichier source, le champ « ordre de fabrication » des pointages correspond "
-    "au numéro de dossier : les deux camemberts ci-dessus reflètent donc la même répartition."
+    "au numéro de dossier."
 )
 
 st.markdown("**Détail des pointages de la semaine**")
@@ -275,9 +287,9 @@ if not of_semaine.empty:
     # Delta = temps_devis - temps_operateurs : positif si le dossier a été réalisé
     # plus vite que prévu, négatif s'il a pris plus de temps que le devis.
     table_of["delta (h)"] = (table_of["temps_devis (h)"] - table_of["temps_operateurs (h)"]).round(2)
-    table_of["ratio (devis/opérateurs)"] = (
-        table_of["temps_devis (h)"] / table_of["temps_operateurs (h)"].replace(0, float("nan"))
-    ).round(2)
+    table_of["ratio (devis/opérateurs) (%)"] = (
+        table_of["temps_devis (h)"] / table_of["temps_operateurs (h)"].replace(0, float("nan")) * 100
+    ).round(1)
 
     # Écart relatif utilisé pour la mise en forme conditionnelle (en %),
     # car les dossiers ont des ordres de grandeur très différents en heures.
@@ -298,7 +310,18 @@ if not of_semaine.empty:
             color = "background-color: #d4edda"
         return [color] * len(row)
 
-    styled_table_of = table_of.style.apply(highlight_row, axis=1)
+    styled_table_of = (
+        table_of.style.apply(highlight_row, axis=1)
+        .format(
+            {
+                "temps_devis (h)": "{:.2f}",
+                "temps_operateurs (h)": "{:.2f}",
+                "delta (h)": "{:.2f}",
+                "ratio (devis/opérateurs) (%)": "{:.0f}%",
+            },
+            na_rep="–",
+        )
+    )
     st.dataframe(styled_table_of, use_container_width=True, hide_index=True)
     st.caption(
         "🟥 Écart trop négatif (dossier plus long que prévu) · "
