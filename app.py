@@ -177,7 +177,7 @@ with col_pie1:
         data1 = pie_top_n(pointages_semaine, "ordre_fabrication", "Durée h")
         fig1 = px.pie(data1, names="ordre_fabrication", values="Durée h", hole=0.35)
         fig1.update_traces(textposition="inside", textinfo="percent+label")
-        st.plotly_chart(fig1, use_container_width=True)
+        st.plotly_chart(fig1, use_container_width=True, key="pie_heures_par_dossier")
     else:
         st.info("Aucun pointage sur cette semaine.")
 
@@ -187,7 +187,7 @@ with col_pie2:
         data2 = pie_top_n(pointages_semaine, "ordre_fabrication", "Durée h")
         fig2 = px.pie(data2, names="ordre_fabrication", values="Durée h", hole=0.35)
         fig2.update_traces(textposition="inside", textinfo="percent+label")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, use_container_width=True, key="pie_duree_par_of")
     else:
         st.info("Aucun pointage sur cette semaine.")
 
