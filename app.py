@@ -213,6 +213,15 @@ else:
 # Indicateurs — dossiers clôturés dans la semaine
 # ---------------------------------------------------------------------------
 
+with st.sidebar:
+    st.header("🎯 Mise en forme")
+    seuil_ecart = st.slider(
+        "Seuil de tolérance de l'écart (%)",
+        min_value=5, max_value=100, value=20, step=5,
+        help="Écart = (temps_devis − temps_opérateurs) / temps_devis. "
+             "Au-delà de ce seuil (en valeur absolue), la ligne est colorée.",
+    )
+
 st.divider()
 st.subheader("📦 Dossiers clôturés cette semaine")
 
@@ -262,6 +271,39 @@ if not of_semaine.empty:
     ).sort_values("created_at", ascending=False).reset_index(drop=True)
     table_of["temps_devis (h)"] = table_of["temps_devis (h)"].round(2)
     table_of["temps_operateurs (h)"] = table_of["temps_operateurs (h)"].round(2)
-    st.dataframe(table_of, use_container_width=True, hide_index=True)
+
+    # Delta = temps_devis - temps_operateurs : positif si le dossier a été réalisé
+    # plus vite que prévu, négatif s'il a pris plus de temps que le devis.
+    table_of["delta (h)"] = (table_of["temps_devis (h)"] - table_of["temps_operateurs (h)"]).round(2)
+    table_of["ratio (devis/opérateurs)"] = (
+        table_of["temps_devis (h)"] / table_of["temps_operateurs (h)"].replace(0, float("nan"))
+    ).round(2)
+
+    # Écart relatif utilisé pour la mise en forme conditionnelle (en %),
+    # car les dossiers ont des ordres de grandeur très différents en heures.
+    ecart_pct = table_of["delta (h)"] / table_of["temps_devis (h)"].replace(0, float("nan")) * 100
+
+    def highlight_row(row):
+        pct = ecart_pct.loc[row.name]
+        if pd.isna(pct):
+            return [""] * len(row)
+        if pct < -seuil_ecart:
+            # écart trop négatif : le dossier a pris beaucoup plus de temps que prévu
+            color = "background-color: #f8d7da"
+        elif pct > seuil_ecart:
+            # écart trop positif : le dossier a été réalisé beaucoup plus vite que prévu
+            color = "background-color: #ffe5b4"
+        else:
+            # écart nul ou faible
+            color = "background-color: #d4edda"
+        return [color] * len(row)
+
+    styled_table_of = table_of.style.apply(highlight_row, axis=1)
+    st.dataframe(styled_table_of, use_container_width=True, hide_index=True)
+    st.caption(
+        "🟥 Écart trop négatif (dossier plus long que prévu) · "
+        "🟧 Écart trop positif (dossier plus rapide que prévu) · "
+        "🟩 Écart nul ou faible, dans la tolérance."
+    )
 else:
     st.info("Aucun dossier clôturé sur cette semaine.")
