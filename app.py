@@ -95,9 +95,12 @@ def build_week_options(df_pointages: pd.DataFrame, df_of: pd.DataFrame) -> pd.Da
 def pie_top_n(df: pd.DataFrame, group_col: str, value_col: str, n: int = 12):
     """Regroupe les catégories au-delà du top N dans 'Autres' pour un camembert lisible."""
     agg = df.groupby(group_col, dropna=False)[value_col].sum().sort_values(ascending=False)
+    agg.index.name = group_col
+    agg.name = value_col
     if len(agg) > n:
         top = agg.iloc[:n]
-        other = pd.Series({"Autres": agg.iloc[n:].sum()})
+        other = pd.Series({"Autres": agg.iloc[n:].sum()}, name=value_col)
+        other.index.name = group_col
         agg = pd.concat([top, other])
     return agg.reset_index()
 
