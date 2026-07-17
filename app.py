@@ -71,6 +71,19 @@ def load_data(file_bytes: bytes):
         df_pointages["id_operateur"].astype(str).map(operateur_map).fillna(df_pointages["id_operateur"].astype(str))
     )
 
+    # --- Jointure dossier -> client (via numero_dossier de ordres_fabrication) --
+    client_map = (
+        df_of.dropna(subset=["numero_dossier"])
+        .drop_duplicates(subset="numero_dossier")
+        .set_index("numero_dossier")["client"]
+    )
+    df_pointages["client"] = df_pointages["ordre_fabrication"].map(client_map)
+    df_pointages["dossier_client"] = (
+        df_pointages["ordre_fabrication"].astype(str)
+        + " – "
+        + df_pointages["client"].fillna("Client inconnu")
+    )
+
     return df_pointages, df_of
 
 
@@ -189,8 +202,8 @@ col_pie1, col_pie2 = st.columns(2)
 with col_pie1:
     st.markdown("**Répartition des heures par dossier**")
     if not pointages_semaine.empty:
-        data1 = pie_top_n(pointages_semaine, "ordre_fabrication", "Durée h")
-        fig1 = px.pie(data1, names="ordre_fabrication", values="Durée h", hole=0.35)
+        data1 = pie_top_n(pointages_semaine, "dossier_client", "Durée h")
+        fig1 = px.pie(data1, names="dossier_client", values="Durée h", hole=0.35)
         fig1.update_traces(textposition="inside", textinfo="percent+label")
         st.plotly_chart(fig1, use_container_width=True, key="pie_heures_par_dossier")
     else:
@@ -201,7 +214,11 @@ with col_pie2:
     if not pointages_semaine.empty:
         data2 = pie_top_n(pointages_semaine, "operateur", "Durée h")
         fig2 = px.pie(data2, names="operateur", values="Durée h", hole=0.35)
-        fig2.update_traces(textposition="inside", textinfo="percent+label")
+        fig2.update_traces(
+            textposition="inside",
+            textinfo="label+percent",
+            texttemplate="%{label}<br>%{value:.1f} h (%{percent})",
+        )
         st.plotly_chart(fig2, use_container_width=True, key="pie_heures_par_operateur")
     else:
         st.info("Aucun pointage sur cette semaine.")
@@ -287,13 +304,15 @@ if not of_semaine.empty:
     # Delta = temps_devis - temps_operateurs : positif si le dossier a été réalisé
     # plus vite que prévu, négatif s'il a pris plus de temps que le devis.
     table_of["delta (h)"] = (table_of["temps_devis (h)"] - table_of["temps_operateurs (h)"]).round(2)
-    table_of["ratio (devis/opérateurs) (%)"] = (
-        table_of["temps_devis (h)"] / table_of["temps_operateurs (h)"].replace(0, float("nan")) * 100
+
+    # Ratio = (temps_devis - temps_operateurs) / temps_devis, en % : positif si le
+    # dossier a été réalisé plus vite que prévu, négatif s'il a pris plus de temps.
+    table_of["ratio (devis-opérateurs)/devis (%)"] = (
+        table_of["delta (h)"] / table_of["temps_devis (h)"].replace(0, float("nan")) * 100
     ).round(1)
 
-    # Écart relatif utilisé pour la mise en forme conditionnelle (en %),
-    # car les dossiers ont des ordres de grandeur très différents en heures.
-    ecart_pct = table_of["delta (h)"] / table_of["temps_devis (h)"].replace(0, float("nan")) * 100
+    # Écart relatif utilisé pour la mise en forme conditionnelle (identique au ratio ci-dessus).
+    ecart_pct = table_of["ratio (devis-opérateurs)/devis (%)"]
 
     def highlight_row(row):
         pct = ecart_pct.loc[row.name]
@@ -317,7 +336,7 @@ if not of_semaine.empty:
                 "temps_devis (h)": "{:.2f}",
                 "temps_operateurs (h)": "{:.2f}",
                 "delta (h)": "{:.2f}",
-                "ratio (devis/opérateurs) (%)": "{:.0f}%",
+                "ratio (devis-opérateurs)/devis (%)": "{:.0f}%",
             },
             na_rep="–",
         )
