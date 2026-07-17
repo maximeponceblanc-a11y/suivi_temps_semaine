@@ -225,6 +225,28 @@ d1.metric("Heures livrées cette semaine", f"{heures_livrees:.1f} h")
 d2.metric("Heures théoriques livrées cette semaine", f"{heures_theoriques:.1f} h")
 d3.metric("Ratio temps (livré / théorique)", f"{ratio_temps:.0%}")
 
+st.markdown("**Temps par poste**")
+if not of_semaine.empty:
+    par_poste = (
+        of_semaine.groupby("poste")[["temps_operateurs_h", "temps_devis_h"]]
+        .sum()
+        .rename(columns={"temps_operateurs_h": "Temps de production", "temps_devis_h": "Temps devis"})
+        .sort_values("Temps devis", ascending=True)
+        .reset_index()
+    )
+    fig_poste = px.bar(
+        par_poste,
+        y="poste",
+        x=["Temps de production", "Temps devis"],
+        orientation="h",
+        barmode="group",
+        labels={"value": "Heures", "poste": "", "variable": ""},
+    )
+    fig_poste.update_layout(legend_title_text="")
+    st.plotly_chart(fig_poste, use_container_width=True, key="bar_temps_par_poste")
+else:
+    st.info("Aucun dossier clôturé sur cette semaine.")
+
 st.markdown("**Ordres de fabrication clôturés dans la semaine**")
 if not of_semaine.empty:
     table_of = of_semaine[
