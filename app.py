@@ -189,13 +189,15 @@ of_semaine = df_of.loc[mask_of].copy()
 
 heures_attribuees = pointages_semaine["Durée h"].sum()
 nb_operateurs = pointages_semaine["id_operateur"].nunique()
-taux_attribution = (heures_attribuees / (35 * nb_operateurs)) if nb_operateurs > 0 else 0
+temps_theorique = nb_operateurs * 35
+taux_attribution = (heures_attribuees / temps_theorique) if temps_theorique > 0 else 0
 
 st.subheader("👷 Activité des opérateurs")
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 c1.metric("Nombre d'heures attribuées", f"{heures_attribuees:.1f} h")
 c2.metric("Opérateurs ayant pointé", f"{nb_operateurs}")
-c3.metric("Taux d'attribution", f"{taux_attribution:.0%}", help="Heures attribuées / (35 × nb opérateurs)")
+c3.metric("Temps travaillé théorique", f"{temps_theorique:.0f} h", help="Nombre d'opérateurs ayant pointé × 35 h")
+c4.metric("Taux d'attribution", f"{taux_attribution:.0%}", help="Heures attribuées / (35 × nb opérateurs)")
 
 col_pie1, col_pie2 = st.columns(2)
 
@@ -212,8 +214,8 @@ with col_pie1:
 with col_pie2:
     st.markdown("**Répartition du nombre d'heures par opérateur**")
     if not pointages_semaine.empty:
-        data2 = pie_top_n(pointages_semaine, "operateur", "Durée h")
-        fig2 = px.pie(data2, names="operateur", values="Durée h", hole=0.35)
+        data2 = pie_top_n(pointages_semaine, "id_operateur", "Durée h")
+        fig2 = px.pie(data2, names="id_operateur", values="Durée h", hole=0.35)
         fig2.update_traces(
             textposition="inside",
             textinfo="label+percent",
@@ -231,7 +233,7 @@ st.caption(
 st.markdown("**Détail des pointages de la semaine**")
 if not pointages_semaine.empty:
     table_pointages = pointages_semaine[
-        ["id", "created_at", "operation", "ordre_fabrication", "heure_debut", "heure_fin", "Durée h"]
+        ["id", "created_at", "id_operateur", "operation", "ordre_fabrication", "heure_debut", "heure_fin", "Durée h"]
     ].sort_values("heure_debut", ascending=False).reset_index(drop=True)
     table_pointages["Durée h"] = table_pointages["Durée h"].round(2)
     st.dataframe(table_pointages, use_container_width=True, hide_index=True)
@@ -284,6 +286,32 @@ if not of_semaine.empty:
     )
     fig_poste.update_layout(legend_title_text="")
     st.plotly_chart(fig_poste, use_container_width=True, key="bar_temps_par_poste")
+else:
+    st.info("Aucun dossier clôturé sur cette semaine.")
+
+st.markdown("**Temps par dossier clôturé**")
+if not of_semaine.empty:
+    of_semaine_label = of_semaine.copy()
+    of_semaine_label["dossier_client"] = (
+        of_semaine_label["numero_dossier"].astype(str) + " – " + of_semaine_label["client"].fillna("Client inconnu")
+    )
+    par_dossier = (
+        of_semaine_label.groupby("dossier_client")[["temps_operateurs_h", "temps_devis_h"]]
+        .sum()
+        .rename(columns={"temps_operateurs_h": "Temps de production", "temps_devis_h": "Temps devis"})
+        .sort_values("Temps devis", ascending=True)
+        .reset_index()
+    )
+    fig_dossier = px.bar(
+        par_dossier,
+        y="dossier_client",
+        x=["Temps de production", "Temps devis"],
+        orientation="h",
+        barmode="group",
+        labels={"value": "Heures", "dossier_client": "", "variable": ""},
+    )
+    fig_dossier.update_layout(legend_title_text="", height=max(300, 40 * len(par_dossier)))
+    st.plotly_chart(fig_dossier, use_container_width=True, key="bar_temps_par_dossier")
 else:
     st.info("Aucun dossier clôturé sur cette semaine.")
 
