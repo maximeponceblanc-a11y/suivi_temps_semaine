@@ -257,11 +257,13 @@ st.subheader("📦 Dossiers clôturés cette semaine")
 heures_livrees = of_semaine["temps_operateurs_h"].sum()
 heures_theoriques = of_semaine["temps_devis_h"].sum()
 ratio_temps = (heures_livrees / heures_theoriques) if heures_theoriques > 0 else 0
+nb_dossiers_clotures = of_semaine["numero_dossier"].nunique()
 
-d1, d2, d3 = st.columns(3)
-d1.metric("Heures livrées cette semaine", f"{heures_livrees:.1f} h")
-d2.metric("Heures théoriques livrées cette semaine", f"{heures_theoriques:.1f} h")
-d3.metric("Ratio temps (livré / théorique)", f"{ratio_temps:.0%}")
+d1, d2, d3, d4 = st.columns(4)
+d1.metric("Nombre de dossiers clôturés", f"{nb_dossiers_clotures}")
+d2.metric("Heures livrées cette semaine", f"{heures_livrees:.1f} h")
+d3.metric("Heures théoriques livrées cette semaine", f"{heures_theoriques:.1f} h")
+d4.metric("Ratio temps (livré / théorique)", f"{ratio_temps:.0%}")
 
 st.markdown("**Temps par poste**")
 if not of_semaine.empty:
