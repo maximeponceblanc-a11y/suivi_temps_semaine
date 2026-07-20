@@ -189,14 +189,14 @@ of_semaine = df_of.loc[mask_of].copy()
 
 heures_attribuees = pointages_semaine["Durée h"].sum()
 nb_operateurs = pointages_semaine["id_operateur"].nunique()
-temps_theorique = nb_operateurs * 35
+temps_theorique = nb_operateurs * 39
 taux_attribution = (heures_attribuees / temps_theorique) if temps_theorique > 0 else 0
 
 st.subheader("👷 Activité des opérateurs")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Nombre d'heures attribuées", f"{heures_attribuees:.1f} h")
 c2.metric("Opérateurs ayant pointé", f"{nb_operateurs}")
-c3.metric("Temps travaillé théorique", f"{temps_theorique:.0f} h", help="Nombre d'opérateurs ayant pointé × 35 h")
+c3.metric("Temps travaillé théorique", f"{temps_theorique:.0f} h", help="Nombre d'opérateurs ayant pointé × 39 h")
 c4.metric("Taux d'attribution", f"{taux_attribution:.0%}", help="Heures attribuées / (35 × nb opérateurs)")
 
 col_pie1, col_pie2 = st.columns(2)
