@@ -143,6 +143,9 @@ with st.sidebar:
         type=["xlsx"],
         help="Fichier contenant les feuilles 'temps_reel_operateur' et 'ordres_fabrication'.",
     )
+    if st.button("🔄 Vider le cache et recharger", help="À utiliser si vous venez de mettre à jour le fichier source et que les chiffres semblent obsolètes."):
+        st.cache_data.clear()
+        st.rerun()
 
 if uploaded_file is None:
     st.info("👈 Chargez votre fichier Excel de données dans la barre latérale pour démarrer.")
@@ -172,6 +175,11 @@ sel_year, sel_week = int(selected_row["iso_year"]), int(selected_row["iso_week"]
 monday, sunday = week_bounds(sel_year, sel_week)
 
 st.caption(f"Semaine sélectionnée : **du {monday.strftime('%d/%m/%Y')} au {sunday.strftime('%d/%m/%Y')}**")
+st.caption(
+    f"🕒 Dernière date de clôture présente dans le fichier chargé : "
+    f"**{df_of['date_cloture'].max().strftime('%d/%m/%Y') if df_of['date_cloture'].notna().any() else 'aucune'}** "
+    f"— si cette date vous semble ancienne, cliquez sur « Vider le cache et recharger »."
+)
 
 # ---------------------------------------------------------------------------
 # Filtrage des données de la semaine
@@ -180,7 +188,11 @@ st.caption(f"Semaine sélectionnée : **du {monday.strftime('%d/%m/%Y')} au {sun
 mask_pointages = (df_pointages["iso_year"] == sel_year) & (df_pointages["iso_week"] == sel_week)
 pointages_semaine = df_pointages.loc[mask_pointages].copy()
 
-mask_of = (df_of["iso_year"] == sel_year) & (df_of["iso_week"] == sel_week)
+mask_of = (
+    (df_of["iso_year"] == sel_year)
+    & (df_of["iso_week"] == sel_week)
+    & (df_of["statut_production"] == "Clos")  # ne garder que les dossiers réellement clôturés
+)
 of_semaine = df_of.loc[mask_of].copy()
 
 # ---------------------------------------------------------------------------
