@@ -427,3 +427,86 @@ if not of_semaine.empty:
         st.info("Aucun dossier ne correspond aux critères de recherche sélectionnés.")
 else:
     st.info("Aucun dossier clôturé sur cette semaine.")
+
+
+# ---------------------------------------------------------------------------
+# Recherche et Analyse d'un dossier spécifique (Global)
+# ---------------------------------------------------------------------------
+st.divider()
+st.header("🔍 Analyse d'un dossier spécifique")
+st.markdown("Cette section permet de consulter les détails d'un dossier indépendamment de la semaine sélectionnée (dossiers en cours, anciens, etc.).")
+
+# 1. Récupérer la liste de tous les dossiers (sans le filtre de la semaine)
+tous_les_dossiers = sorted(df_of["numero_dossier"].dropna().astype(str).unique().tolist())
+
+# 2. Sélecteur de dossier
+dossier_choisi = st.selectbox(
+    "Sélectionnez ou tapez le numéro d'un dossier :",
+    options=[""] + tous_les_dossiers,
+    format_func=lambda x: "Sélectionnez un dossier..." if x == "" else x,
+    help="Vous pouvez taper directement le numéro pour le trouver plus vite."
+)
+
+if dossier_choisi != "":
+    # 3. Filtrer les données globales pour ce dossier spécifique
+    spec_of = df_of[df_of["numero_dossier"].astype(str) == dossier_choisi].copy()
+    spec_pointages = df_pointages[df_pointages["ordre_fabrication"].astype(str) == dossier_choisi].copy()
+
+    if not spec_of.empty:
+        # En-tête du dossier
+        client_nom = spec_of["client"].iloc[0]
+        st.subheader(f"Dossier : {dossier_choisi} — {client_nom if pd.notna(client_nom) else 'Client inconnu'}")
+
+        # 4. Calcul des indicateurs globaux du dossier
+        devis_total = spec_of["temps_devis_h"].sum()
+        realise_total = spec_of["temps_operateurs_h"].sum()
+        ecart_total = devis_total - realise_total
+
+        c_spec1, c_spec2, c_spec3 = st.columns(3)
+        c_spec1.metric("Temps devisé (Total)", f"{devis_total:.1f} h")
+        c_spec2.metric("Temps réalisé (Total)", f"{realise_total:.1f} h")
+        
+        # Coloration de l'écart : Rouge si on dépasse le devis, Vert si on est en dessous
+        delta_color = "normal" if ecart_total >= 0 else "inverse"
+        c_spec3.metric("Écart (Devis - Réalisé)", f"{ecart_total:.1f} h", delta_color=delta_color)
+
+        # 5. Graphique : Temps par poste
+        st.markdown("**Temps par poste**")
+        par_poste_spec = (
+            spec_of.groupby("poste", dropna=False)[["temps_operateurs_h", "temps_devis_h"]]
+            .sum()
+            .rename(columns={"temps_operateurs_h": "Temps de production", "temps_devis_h": "Temps devis"})
+            .sort_values("Temps devis", ascending=True)
+            .reset_index()
+        )
+        par_poste_spec["poste"] = par_poste_spec["poste"].fillna("Non défini")
+
+        fig_poste_spec = px.bar(
+            par_poste_spec,
+            y="poste",
+            x=["Temps de production", "Temps devis"],
+            orientation="h",
+            barmode="group",
+            labels={"value": "Heures", "poste": "Poste", "variable": "Type de temps"}
+        )
+        fig_poste_spec.update_layout(legend_title_text="")
+        st.plotly_chart(fig_poste_spec, use_container_width=True, key=f"bar_spec_{dossier_choisi}")
+    else:
+        st.warning("Ce dossier est introuvable dans la liste globale des ordres de fabrication.")
+
+    # 6. Tableau détaillé par pointages
+    st.markdown("**Détail des pointages réalisés sur ce dossier**")
+    if not spec_pointages.empty:
+        # On utilise "operateur" (le nom) plutôt que l'ID pour plus de lisibilité
+        table_spec_pt = spec_pointages[
+            ["operateur", "operation", "heure_debut", "heure_fin", "Durée h"]
+        ].sort_values("heure_debut", ascending=False).reset_index(drop=True)
+        
+        table_spec_pt["Durée h"] = table_spec_pt["Durée h"].round(2)
+        # Formatage des dates pour faire plus propre
+        table_spec_pt["heure_debut"] = table_spec_pt["heure_debut"].dt.strftime("%d/%m/%Y %H:%M")
+        table_spec_pt["heure_fin"] = table_spec_pt["heure_fin"].dt.strftime("%d/%m/%Y %H:%M")
+
+        st.dataframe(table_spec_pt, use_container_width=True, hide_index=True)
+    else:
+        st.info("Aucun pointage opérateur n'a encore été enregistré pour ce dossier.")
