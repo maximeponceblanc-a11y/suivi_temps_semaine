@@ -59,18 +59,6 @@ def load_data(file_bytes: bytes):
     df_of["iso_year"] = iso_of["year"]
     df_of["iso_week"] = iso_of["week"]
 
-    # --- Feuille des employés (pour afficher le nom des opérateurs) -------------
-    try:
-        df_emp = pd.read_excel(xls, sheet_name="employes")
-        noms = (df_emp["prenom"].fillna("") + " " + df_emp["nom"].fillna("")).str.strip()
-        operateur_map = dict(zip(df_emp["id"].astype(str), noms))
-    except Exception:
-        operateur_map = {}
-
-    df_pointages["operateur"] = (
-        df_pointages["id_operateur"].astype(str).map(operateur_map).fillna(df_pointages["id_operateur"].astype(str))
-    )
-
     # --- Jointure dossier -> client (via numero_dossier de ordres_fabrication) --
     client_map = (
         df_of.dropna(subset=["numero_dossier"])
@@ -494,16 +482,15 @@ if dossier_choisi != "":
     else:
         st.warning("Ce dossier est introuvable dans la liste globale des ordres de fabrication.")
 
-    # 6. Tableau détaillé par pointages
+    # 6. Tableau détaillé par pointages (Affichage uniquement de l'ID opérateur pour préserver l'anonymat)
     st.markdown("**Détail des pointages réalisés sur ce dossier**")
     if not spec_pointages.empty:
-        # On utilise "operateur" (le nom) plutôt que l'ID pour plus de lisibilité
         table_spec_pt = spec_pointages[
-            ["operateur", "operation", "heure_debut", "heure_fin", "Durée h"]
+            ["id_operateur", "operation", "heure_debut", "heure_fin", "Durée h"]
         ].sort_values("heure_debut", ascending=False).reset_index(drop=True)
         
         table_spec_pt["Durée h"] = table_spec_pt["Durée h"].round(2)
-        # Formatage des dates pour faire plus propre
+        # Formatage des dates
         table_spec_pt["heure_debut"] = table_spec_pt["heure_debut"].dt.strftime("%d/%m/%Y %H:%M")
         table_spec_pt["heure_fin"] = table_spec_pt["heure_fin"].dt.strftime("%d/%m/%Y %H:%M")
 
