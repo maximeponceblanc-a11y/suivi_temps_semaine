@@ -329,65 +329,101 @@ else:
 
 st.markdown("**Ordres de fabrication clôturés dans la semaine**")
 if not of_semaine.empty:
-    table_of = of_semaine[
-        [
-            "id", "created_at", "numero_devis", "numero_dossier", "client",
-            "reference", "operation", "temps_devis_h", "temps_operateurs_h",
-        ]
-    ].rename(
-        columns={
-            "temps_devis_h": "temps_devis (h)",
-            "temps_operateurs_h": "temps_operateurs (h)",
-        }
-    ).sort_values("created_at", ascending=False).reset_index(drop=True)
-    table_of["temps_devis (h)"] = table_of["temps_devis (h)"].round(2)
-    table_of["temps_operateurs (h)"] = table_of["temps_operateurs (h)"].round(2)
+    # -----------------------------------------------------------------------
+    # Ajout du filtre sur le numéro de dossier
+    # -----------------------------------------------------------------------
+    dossiers_disponibles = sorted(
+        of_semaine["numero_dossier"].dropna().astype(str).unique().tolist()
+    )
 
-    # Delta = temps_devis - temps_operateurs : positif si le dossier a été réalisé
-    # plus vite que prévu, négatif s'il a pris plus de temps que le devis.
-    table_of["delta (h)"] = (table_of["temps_devis (h)"] - table_of["temps_operateurs (h)"]).round(2)
-
-    # Ratio = (temps_devis - temps_operateurs) / temps_devis, en % : positif si le
-    # dossier a été réalisé plus vite que prévu, négatif s'il a pris plus de temps.
-    table_of["ratio (devis-opérateurs)/devis (%)"] = (
-        table_of["delta (h)"] / table_of["temps_devis (h)"].replace(0, float("nan")) * 100
-    ).round(1)
-
-    # Écart relatif utilisé pour la mise en forme conditionnelle (identique au ratio ci-dessus).
-    ecart_pct = table_of["ratio (devis-opérateurs)/devis (%)"]
-
-    def highlight_row(row):
-        pct = ecart_pct.loc[row.name]
-        if pd.isna(pct):
-            return [""] * len(row)
-        if pct < -seuil_ecart:
-            # écart trop négatif : le dossier a pris beaucoup plus de temps que prévu
-            color = "background-color: #f8d7da"
-        elif pct > seuil_ecart:
-            # écart trop positif : le dossier a été réalisé beaucoup plus vite que prévu
-            color = "background-color: #ffe5b4"
-        else:
-            # écart nul ou faible
-            color = "background-color: #d4edda"
-        return [color] * len(row)
-
-    styled_table_of = (
-        table_of.style.apply(highlight_row, axis=1)
-        .format(
-            {
-                "temps_devis (h)": "{:.2f}",
-                "temps_operateurs (h)": "{:.2f}",
-                "delta (h)": "{:.2f}",
-                "ratio (devis-opérateurs)/devis (%)": "{:.0f}%",
-            },
-            na_rep="–",
+    f_col1, f_col2 = st.columns([2, 1])
+    with f_col1:
+        selected_dossiers = st.multiselect(
+            "🔎 Filtrer par numéro de dossier",
+            options=dossiers_disponibles,
+            default=[],
+            placeholder="Sélectionnez un ou plusieurs dossiers (laisser vide pour tout voir)",
         )
-    )
-    st.dataframe(styled_table_of, use_container_width=True, hide_index=True)
-    st.caption(
-        "🟥 Écart trop négatif (dossier plus long que prévu) · "
-        "🟧 Écart trop positif (dossier plus rapide que prévu) · "
-        "🟩 Écart nul ou faible, dans la tolérance."
-    )
+
+    # Filtrage du dataframe selon la sélection
+    if selected_dossiers:
+        of_semaine_filtered = of_semaine[
+            of_semaine["numero_dossier"].astype(str).isin(selected_dossiers)
+        ].copy()
+    else:
+        of_semaine_filtered = of_semaine.copy()
+
+    # -----------------------------------------------------------------------
+    # Construction du tableau avec les données filtrées
+    # -----------------------------------------------------------------------
+    if not of_semaine_filtered.empty:
+        table_of = of_semaine_filtered[
+            [
+                "id",
+                "created_at",
+                "numero_devis",
+                "numero_dossier",
+                "client",
+                "reference",
+                "operation",
+                "temps_devis_h",
+                "temps_operateurs_h",
+            ]
+        ].rename(
+            columns={
+                "temps_devis_h": "temps_devis (h)",
+                "temps_operateurs_h": "temps_operateurs (h)",
+            }
+        ).sort_values("created_at", ascending=False).reset_index(drop=True)
+
+        table_of["temps_devis (h)"] = table_of["temps_devis (h)"].round(2)
+        table_of["temps_operateurs (h)"] = table_of["temps_operateurs (h)"].round(2)
+
+        # Delta = temps_devis - temps_operateurs
+        table_of["delta (h)"] = (
+            table_of["temps_devis (h)"] - table_of["temps_operateurs (h)"]
+        ).round(2)
+
+        # Ratio = (temps_devis - temps_operateurs) / temps_devis
+        table_of["ratio (devis-opérateurs)/devis (%)"] = (
+            table_of["delta (h)"]
+            / table_of["temps_devis (h)"].replace(0, float("nan"))
+            * 100
+        ).round(1)
+
+        ecart_pct = table_of["ratio (devis-opérateurs)/devis (%)"]
+
+        def highlight_row(row):
+            pct = ecart_pct.loc[row.name]
+            if pd.isna(pct):
+                return [""] * len(row)
+            if pct < -seuil_ecart:
+                color = "background-color: #f8d7da"
+            elif pct > seuil_ecart:
+                color = "background-color: #ffe5b4"
+            else:
+                color = "background-color: #d4edda"
+            return [color] * len(row)
+
+        styled_table_of = (
+            table_of.style.apply(highlight_row, axis=1)
+            .format(
+                {
+                    "temps_devis (h)": "{:.2f}",
+                    "temps_operateurs (h)": "{:.2f}",
+                    "delta (h)": "{:.2f}",
+                    "ratio (devis-opérateurs)/devis (%)": "{:.0f}%",
+                },
+                na_rep="–",
+            )
+        )
+        st.dataframe(styled_table_of, use_container_width=True, hide_index=True)
+        st.caption(
+            "🟥 Écart trop négatif (dossier plus long que prévu) · "
+            "🟧 Écart trop positif (dossier plus rapide que prévu) · "
+            "🟩 Écart nul ou faible, dans la tolérance."
+        )
+    else:
+        st.info("Aucun dossier ne correspond aux critères de recherche sélectionnés.")
 else:
     st.info("Aucun dossier clôturé sur cette semaine.")
