@@ -383,6 +383,11 @@ if not of_semaine.empty:
 
         def highlight_row(row):
             pct = ecart_pct.loc[row.name]
+            
+            # Nouvelle condition : Opération non pointée (Gris)
+            if row["temps_operateurs (h)"] == 0:
+                return ["background-color: #e2e3e5"] * len(row)
+                
             if pd.isna(pct):
                 return [""] * len(row)
             if pct < -seuil_ecart:
@@ -407,6 +412,7 @@ if not of_semaine.empty:
         )
         st.dataframe(styled_table_of, use_container_width=True, hide_index=True)
         st.caption(
+            "⬜ Opération non pointée (0h) · "
             "🟥 Écart trop négatif (dossier plus long que prévu) · "
             "🟧 Écart trop positif (dossier plus rapide que prévu) · "
             "🟩 Écart nul ou faible, dans la tolérance."
@@ -479,11 +485,86 @@ if dossier_choisi != "":
         )
         fig_poste_spec.update_layout(legend_title_text="")
         st.plotly_chart(fig_poste_spec, use_container_width=True, key=f"bar_spec_{dossier_choisi}")
+
+        # 6. Tableau détaillé par opérations du dossier (Nouveau tableau avec colonnes et style)
+        st.markdown("**Détail des opérations (Ordres de Fabrication) de ce dossier**")
+        
+        table_spec_of = spec_of[
+            [
+                "id",
+                "created_at",
+                "numero_devis",
+                "client",
+                "reference",
+                "operation",
+                "temps_devis_h",
+                "temps_operateurs_h",
+            ]
+        ].rename(
+            columns={
+                "temps_devis_h": "temps_devis (h)",
+                "temps_operateurs_h": "temps_operateurs (h)",
+            }
+        ).sort_values("created_at", ascending=False).reset_index(drop=True)
+
+        table_spec_of["temps_devis (h)"] = table_spec_of["temps_devis (h)"].round(2)
+        table_spec_of["temps_operateurs (h)"] = table_spec_of["temps_operateurs (h)"].round(2)
+
+        # Calculs Delta et Ratio
+        table_spec_of["delta (h)"] = (
+            table_spec_of["temps_devis (h)"] - table_spec_of["temps_operateurs (h)"]
+        ).round(2)
+
+        table_spec_of["ratio (devis-opérateurs)/devis (%)"] = (
+            table_spec_of["delta (h)"]
+            / table_spec_of["temps_devis (h)"].replace(0, float("nan"))
+            * 100
+        ).round(1)
+
+        ecart_pct_spec = table_spec_of["ratio (devis-opérateurs)/devis (%)"]
+
+        def highlight_row_spec(row):
+            pct = ecart_pct_spec.loc[row.name]
+            
+            # Opération non pointée (Gris)
+            if row["temps_operateurs (h)"] == 0:
+                return ["background-color: #e2e3e5"] * len(row)
+                
+            if pd.isna(pct):
+                return [""] * len(row)
+            if pct < -seuil_ecart:
+                color = "background-color: #f8d7da"
+            elif pct > seuil_ecart:
+                color = "background-color: #ffe5b4"
+            else:
+                color = "background-color: #d4edda"
+            return [color] * len(row)
+
+        styled_table_spec_of = (
+            table_spec_of.style.apply(highlight_row_spec, axis=1)
+            .format(
+                {
+                    "temps_devis (h)": "{:.2f}",
+                    "temps_operateurs (h)": "{:.2f}",
+                    "delta (h)": "{:.2f}",
+                    "ratio (devis-opérateurs)/devis (%)": "{:.0f}%",
+                },
+                na_rep="–",
+            )
+        )
+        st.dataframe(styled_table_spec_of, use_container_width=True, hide_index=True)
+        st.caption(
+            "⬜ Opération non pointée (0h) · "
+            "🟥 Écart trop négatif (dossier plus long que prévu) · "
+            "🟧 Écart trop positif (dossier plus rapide que prévu) · "
+            "🟩 Écart nul ou faible, dans la tolérance."
+        )
+
     else:
         st.warning("Ce dossier est introuvable dans la liste globale des ordres de fabrication.")
 
-    # 6. Tableau détaillé par pointages (Affichage uniquement de l'ID opérateur pour préserver l'anonymat)
-    st.markdown("**Détail des pointages réalisés sur ce dossier**")
+    # 7. Conservation du tableau des pointages purement nominatifs
+    st.markdown("**Détail des pointages horaires individuels sur ce dossier**")
     if not spec_pointages.empty:
         table_spec_pt = spec_pointages[
             ["id_operateur", "operation", "heure_debut", "heure_fin", "Durée h"]
