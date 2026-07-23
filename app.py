@@ -444,7 +444,6 @@ dossier_choisi = st.selectbox(
 if dossier_choisi != "":
     # 3. Filtrer les données globales pour ce dossier spécifique
     spec_of = df_of[df_of["numero_dossier"].astype(str) == dossier_choisi].copy()
-    spec_pointages = df_pointages[df_pointages["ordre_fabrication"].astype(str) == dossier_choisi].copy()
 
     if not spec_of.empty:
         # En-tête du dossier
@@ -486,7 +485,7 @@ if dossier_choisi != "":
         fig_poste_spec.update_layout(legend_title_text="")
         st.plotly_chart(fig_poste_spec, use_container_width=True, key=f"bar_spec_{dossier_choisi}")
 
-        # 6. Tableau détaillé par opérations du dossier (Nouveau tableau avec colonnes et style)
+        # 6. Tableau détaillé par opérations du dossier
         st.markdown("**Détail des opérations (Ordres de Fabrication) de ce dossier**")
         
         table_spec_of = spec_of[
@@ -562,19 +561,3 @@ if dossier_choisi != "":
 
     else:
         st.warning("Ce dossier est introuvable dans la liste globale des ordres de fabrication.")
-
-    # 7. Conservation du tableau des pointages purement nominatifs
-    st.markdown("**Détail des pointages horaires individuels sur ce dossier**")
-    if not spec_pointages.empty:
-        table_spec_pt = spec_pointages[
-            ["id_operateur", "operation", "heure_debut", "heure_fin", "Durée h"]
-        ].sort_values("heure_debut", ascending=False).reset_index(drop=True)
-        
-        table_spec_pt["Durée h"] = table_spec_pt["Durée h"].round(2)
-        # Formatage des dates
-        table_spec_pt["heure_debut"] = table_spec_pt["heure_debut"].dt.strftime("%d/%m/%Y %H:%M")
-        table_spec_pt["heure_fin"] = table_spec_pt["heure_fin"].dt.strftime("%d/%m/%Y %H:%M")
-
-        st.dataframe(table_spec_pt, use_container_width=True, hide_index=True)
-    else:
-        st.info("Aucun pointage opérateur n'a encore été enregistré pour ce dossier.")
