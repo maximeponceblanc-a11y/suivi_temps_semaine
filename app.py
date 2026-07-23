@@ -249,7 +249,7 @@ with st.sidebar:
     seuil_ecart = st.slider(
         "Seuil de tolérance de l'écart (%)",
         min_value=5, max_value=100, value=20, step=5,
-        help="Écart = (temps_devis − temps_opérateurs) / temps_devis. "
+        help="Écart = (temps_opérateurs − temps_devis) / temps_devis. "
              "Au-delà de ce seuil (en valeur absolue), la ligne est colorée.",
     )
 
@@ -367,35 +367,35 @@ if not of_semaine.empty:
         table_of["temps_devis (h)"] = table_of["temps_devis (h)"].round(2)
         table_of["temps_operateurs (h)"] = table_of["temps_operateurs (h)"].round(2)
 
-        # Delta = temps_devis - temps_operateurs
+        # Delta = temps_operateurs - temps_devis (positif si heures en trop)
         table_of["delta (h)"] = (
-            table_of["temps_devis (h)"] - table_of["temps_operateurs (h)"]
+            table_of["temps_operateurs (h)"] - table_of["temps_devis (h)"]
         ).round(2)
 
-        # Ratio = (temps_devis - temps_operateurs) / temps_devis
-        table_of["ratio (devis-opérateurs)/devis (%)"] = (
+        # Ratio = (temps_operateurs - temps_devis) / temps_devis
+        table_of["ratio (opérateurs-devis)/devis (%)"] = (
             table_of["delta (h)"]
             / table_of["temps_devis (h)"].replace(0, float("nan"))
             * 100
         ).round(1)
 
-        ecart_pct = table_of["ratio (devis-opérateurs)/devis (%)"]
+        ecart_pct = table_of["ratio (opérateurs-devis)/devis (%)"]
 
         def highlight_row(row):
             pct = ecart_pct.loc[row.name]
             
-            # Nouvelle condition : Opération non pointée (Gris)
+            # Opération non pointée (Gris)
             if row["temps_operateurs (h)"] == 0:
                 return ["background-color: #e2e3e5"] * len(row)
                 
             if pd.isna(pct):
                 return [""] * len(row)
-            if pct < -seuil_ecart:
-                color = "background-color: #f8d7da"
-            elif pct > seuil_ecart:
-                color = "background-color: #ffe5b4"
+            if pct > seuil_ecart:
+                color = "background-color: #f8d7da"  # Rouge : plus long que prévu (dépassement)
+            elif pct < -seuil_ecart:
+                color = "background-color: #ffe5b4"  # Orange : plus rapide que prévu (économie)
             else:
-                color = "background-color: #d4edda"
+                color = "background-color: #d4edda"  # Vert : dans la tolérance
             return [color] * len(row)
 
         styled_table_of = (
@@ -405,7 +405,7 @@ if not of_semaine.empty:
                     "temps_devis (h)": "{:.2f}",
                     "temps_operateurs (h)": "{:.2f}",
                     "delta (h)": "{:.2f}",
-                    "ratio (devis-opérateurs)/devis (%)": "{:.0f}%",
+                    "ratio (opérateurs-devis)/devis (%)": "{:.0f}%",
                 },
                 na_rep="–",
             )
@@ -413,8 +413,8 @@ if not of_semaine.empty:
         st.dataframe(styled_table_of, use_container_width=True, hide_index=True)
         st.caption(
             "⬜ Opération non pointée (0h) · "
-            "🟥 Écart trop négatif (dossier plus long que prévu) · "
-            "🟧 Écart trop positif (dossier plus rapide que prévu) · "
+            "🟥 Écart trop positif (dépassement d'heures) · "
+            "🟧 Écart trop négatif (dossier plus rapide que prévu) · "
             "🟩 Écart nul ou faible, dans la tolérance."
         )
     else:
@@ -453,15 +453,15 @@ if dossier_choisi != "":
         # 4. Calcul des indicateurs globaux du dossier
         devis_total = spec_of["temps_devis_h"].sum()
         realise_total = spec_of["temps_operateurs_h"].sum()
-        ecart_total = devis_total - realise_total
+        ecart_total = realise_total - devis_total
 
         c_spec1, c_spec2, c_spec3 = st.columns(3)
         c_spec1.metric("Temps devisé (Total)", f"{devis_total:.1f} h")
         c_spec2.metric("Temps réalisé (Total)", f"{realise_total:.1f} h")
         
-        # Coloration de l'écart : Rouge si on dépasse le devis, Vert si on est en dessous
-        delta_color = "normal" if ecart_total >= 0 else "inverse"
-        c_spec3.metric("Écart (Devis - Réalisé)", f"{ecart_total:.1f} h", delta_color=delta_color)
+        # Coloration de l'écart : Rouge si on dépasse le devis (>0), Vert si en dessous (<=0)
+        delta_color = "inverse" if ecart_total > 0 else "normal"
+        c_spec3.metric("Écart (Réalisé - Devis)", f"{ecart_total:.1f} h", delta_color=delta_color)
 
         # 5. Graphique : Temps par poste
         st.markdown("**Temps par poste**")
@@ -509,18 +509,18 @@ if dossier_choisi != "":
         table_spec_of["temps_devis (h)"] = table_spec_of["temps_devis (h)"].round(2)
         table_spec_of["temps_operateurs (h)"] = table_spec_of["temps_operateurs (h)"].round(2)
 
-        # Calculs Delta et Ratio
+        # Calculs Delta et Ratio (Inversés pour refléter le réalisé par rapport au devis)
         table_spec_of["delta (h)"] = (
-            table_spec_of["temps_devis (h)"] - table_spec_of["temps_operateurs (h)"]
+            table_spec_of["temps_operateurs (h)"] - table_spec_of["temps_devis (h)"]
         ).round(2)
 
-        table_spec_of["ratio (devis-opérateurs)/devis (%)"] = (
+        table_spec_of["ratio (opérateurs-devis)/devis (%)"] = (
             table_spec_of["delta (h)"]
             / table_spec_of["temps_devis (h)"].replace(0, float("nan"))
             * 100
         ).round(1)
 
-        ecart_pct_spec = table_spec_of["ratio (devis-opérateurs)/devis (%)"]
+        ecart_pct_spec = table_spec_of["ratio (opérateurs-devis)/devis (%)"]
 
         def highlight_row_spec(row):
             pct = ecart_pct_spec.loc[row.name]
@@ -531,12 +531,12 @@ if dossier_choisi != "":
                 
             if pd.isna(pct):
                 return [""] * len(row)
-            if pct < -seuil_ecart:
-                color = "background-color: #f8d7da"
-            elif pct > seuil_ecart:
-                color = "background-color: #ffe5b4"
+            if pct > seuil_ecart:
+                color = "background-color: #f8d7da"  # Rouge : dépassement
+            elif pct < -seuil_ecart:
+                color = "background-color: #ffe5b4"  # Orange : sous le devis
             else:
-                color = "background-color: #d4edda"
+                color = "background-color: #d4edda"  # Vert : dans la tolérance
             return [color] * len(row)
 
         styled_table_spec_of = (
@@ -546,7 +546,7 @@ if dossier_choisi != "":
                     "temps_devis (h)": "{:.2f}",
                     "temps_operateurs (h)": "{:.2f}",
                     "delta (h)": "{:.2f}",
-                    "ratio (devis-opérateurs)/devis (%)": "{:.0f}%",
+                    "ratio (opérateurs-devis)/devis (%)": "{:.0f}%",
                 },
                 na_rep="–",
             )
@@ -554,8 +554,8 @@ if dossier_choisi != "":
         st.dataframe(styled_table_spec_of, use_container_width=True, hide_index=True)
         st.caption(
             "⬜ Opération non pointée (0h) · "
-            "🟥 Écart trop négatif (dossier plus long que prévu) · "
-            "🟧 Écart trop positif (dossier plus rapide que prévu) · "
+            "🟥 Écart trop positif (dépassement d'heures) · "
+            "🟧 Écart trop négatif (dossier plus rapide que prévu) · "
             "🟩 Écart nul ou faible, dans la tolérance."
         )
 
