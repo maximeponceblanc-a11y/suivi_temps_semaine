@@ -630,6 +630,18 @@ with tab_annuel:
         )
         weekly["semaine"] = weekly["iso_week"].apply(lambda w: f"S{int(w):02d}")
 
+        moyenne_heures_semaine = weekly["heures_attribuees"].mean()
+        moyenne_taux_semaine = weekly["taux_attribution"].mean()
+
+        # Taux d'attribution annuel = heures attribuées / temps théorique total de l'année
+        # (répond à : sur le temps travaillé par les opérateurs, quelle part est
+        # attribuée à un dossier client ?)
+        taux_attribution_annuel = (
+            weekly["heures_attribuees"].sum() / weekly["temps_theorique"].sum()
+            if weekly["temps_theorique"].sum() > 0
+            else float("nan")
+        )
+
         col_a1, col_a2 = st.columns(2)
 
         with col_a1:
@@ -640,10 +652,18 @@ with tab_annuel:
                 y="heures_attribuees",
                 labels={"semaine": "", "heures_attribuees": "Heures attribuées"},
             )
+            fig_heures_semaine.add_hline(
+                y=moyenne_heures_semaine,
+                line_dash="dash",
+                line_color="firebrick",
+                annotation_text=f"Moyenne : {moyenne_heures_semaine:.1f} h",
+                annotation_position="top left",
+            )
             st.plotly_chart(fig_heures_semaine, use_container_width=True, key="bar_heures_par_semaine_annuel")
 
         with col_a2:
             st.markdown("**Taux d'attribution par semaine**")
+            st.caption("Heures attribuées / temps théorique de travail opérateur (nb opérateurs × 39 h)")
             fig_taux_semaine = px.line(
                 weekly,
                 x="semaine",
@@ -652,10 +672,17 @@ with tab_annuel:
                 labels={"semaine": "", "taux_attribution": "Taux d'attribution"},
             )
             fig_taux_semaine.update_yaxes(tickformat=".0%")
-            fig_taux_semaine.add_hline(y=1, line_dash="dot", line_color="gray")
+            fig_taux_semaine.add_hline(
+                y=moyenne_taux_semaine,
+                line_dash="dash",
+                line_color="firebrick",
+                annotation_text=f"Moyenne : {moyenne_taux_semaine:.0%}",
+                annotation_position="top left",
+            )
             st.plotly_chart(fig_taux_semaine, use_container_width=True, key="line_taux_par_semaine_annuel")
     else:
         st.info("Aucun pointage sur l'année sélectionnée.")
+        taux_attribution_annuel = float("nan")
 
     # -----------------------------------------------------------------------
     # Indicateurs généraux de l'année
@@ -672,31 +699,47 @@ with tab_annuel:
         nb_dossiers_annee = par_dossier_annee["numero_dossier"].nunique()
 
         devis_total_annee = par_dossier_annee["temps_devis_h"].sum()
-        attribue_total_annee = par_dossier_annee["temps_operateurs_h"].sum()
+        travaille_total_annee = par_dossier_annee["temps_operateurs_h"].sum()
 
         devis_moyen_dossier = devis_total_annee / nb_dossiers_annee if nb_dossiers_annee else 0
-        attribue_moyen_dossier = attribue_total_annee / nb_dossiers_annee if nb_dossiers_annee else 0
+        travaille_moyen_dossier = travaille_total_annee / nb_dossiers_annee if nb_dossiers_annee else 0
 
+        # Ratio travaillé/devisé par dossier : répond à « passe-t-on plus de temps
+        # que prévu sur un dossier ? » — à ne pas confondre avec le taux d'attribution.
         ratios_dossier = (
             par_dossier_annee["temps_operateurs_h"]
             / par_dossier_annee["temps_devis_h"].replace(0, float("nan"))
         )
-        taux_attribution_moyen_dossier = ratios_dossier.mean()
+        ratio_travaille_devis_moyen_dossier = ratios_dossier.mean()
 
+        st.markdown("**Les deux indicateurs clés**")
+        kk1, kk2 = st.columns(2)
+        kk1.metric(
+            "Taux d'attribution (année)",
+            f"{taux_attribution_annuel:.0%}" if pd.notna(taux_attribution_annuel) else "–",
+            help="Heures attribuées à un dossier (pointages) / temps théorique total de "
+                 "travail opérateur (nb opérateurs × 39 h, cumulé sur l'année). "
+                 "Répond à : sur le temps travaillé par les opérateurs, quelle part "
+                 "est attribuée à un dossier client ?",
+        )
+        kk2.metric(
+            "Ratio travaillé / devisé moyen par dossier",
+            f"{ratio_travaille_devis_moyen_dossier:.0%}" if pd.notna(ratio_travaille_devis_moyen_dossier) else "–",
+            help="Moyenne, sur tous les dossiers clôturés dans l'année, du ratio "
+                 "(heures travaillées / heures devisées) de chaque dossier. "
+                 "Répond à : passe-t-on en général plus de temps que prévu sur un dossier ? "
+                 "(>100% = dépassement du devis, <100% = dossier réalisé plus vite que prévu)",
+        )
+
+        st.markdown("**Détail des heures**")
         k1, k2, k3 = st.columns(3)
         k1.metric("Nombre de dossiers clôturés", f"{nb_dossiers_annee}")
         k2.metric("Nombre total d'heures devisées", f"{devis_total_annee:.1f} h")
-        k3.metric("Nombre total d'heures attribuées", f"{attribue_total_annee:.1f} h")
+        k3.metric("Nombre total d'heures travaillées", f"{travaille_total_annee:.1f} h")
 
-        k4, k5, k6 = st.columns(3)
+        k4, k5 = st.columns(2)
         k4.metric("Heures devisées moy. / dossier", f"{devis_moyen_dossier:.1f} h")
-        k5.metric("Heures attribuées moy. / dossier", f"{attribue_moyen_dossier:.1f} h")
-        k6.metric(
-            "Taux d'attribution moyen / dossier",
-            f"{taux_attribution_moyen_dossier:.0%}" if pd.notna(taux_attribution_moyen_dossier) else "–",
-            help="Moyenne, sur tous les dossiers clôturés dans l'année, du ratio "
-                 "(heures attribuées / heures devisées) de chaque dossier.",
-        )
+        k5.metric("Heures travaillées moy. / dossier", f"{travaille_moyen_dossier:.1f} h")
 
         # -------------------------------------------------------------------
         # Temps par poste
