@@ -633,12 +633,19 @@ with tab_annuel:
         moyenne_heures_semaine = weekly["heures_attribuees"].mean()
         moyenne_taux_semaine = weekly["taux_attribution"].mean()
 
+        # Temps travaillé théorique = nombre moyen d'opérateurs par semaine
+        # x nombre de semaines depuis le début de l'année x 39h
+        # (équivaut à la somme, semaine par semaine, de nb_operateurs x 39h)
+        nb_semaines_ytd = len(weekly)
+        moyenne_operateurs_semaine = weekly["nb_operateurs"].mean()
+        temps_travaille_theorique_annuel = weekly["temps_theorique"].sum()
+
         # Taux d'attribution annuel = heures attribuées / temps théorique total de l'année
         # (répond à : sur le temps travaillé par les opérateurs, quelle part est
         # attribuée à un dossier client ?)
         taux_attribution_annuel = (
-            weekly["heures_attribuees"].sum() / weekly["temps_theorique"].sum()
-            if weekly["temps_theorique"].sum() > 0
+            weekly["heures_attribuees"].sum() / temps_travaille_theorique_annuel
+            if temps_travaille_theorique_annuel > 0
             else float("nan")
         )
 
@@ -683,6 +690,7 @@ with tab_annuel:
     else:
         st.info("Aucun pointage sur l'année sélectionnée.")
         taux_attribution_annuel = float("nan")
+        temps_travaille_theorique_annuel = float("nan")
 
     # -----------------------------------------------------------------------
     # Indicateurs généraux de l'année
@@ -713,33 +721,70 @@ with tab_annuel:
         ratio_travaille_devis_moyen_dossier = ratios_dossier.mean()
 
         st.markdown("**Les deux indicateurs clés**")
-        kk1, kk2 = st.columns(2)
-        kk1.metric(
+
+        # Ligne 1 : temps théorique & taux d'attribution
+        r1c1, r1c2, r1c3 = st.columns(3)
+        r1c1.metric(
+            "Temps travaillé théorique",
+            f"{temps_travaille_theorique_annuel:.0f} h" if pd.notna(temps_travaille_theorique_annuel) else "–",
+            help="Nombre moyen d'opérateurs actifs par semaine × nombre de semaines "
+                 "écoulées depuis le début de l'année × 39 h. C'est le volume d'heures "
+                 f"que l'ensemble des opérateurs aurait dû produire en théorie sur les "
+                 f"{nb_semaines_ytd if not pd.isna(nb_semaines_ytd) else '–'} semaines de l'année "
+                 "(base 39 h/semaine/opérateur).",
+        )
+        r1c2.metric(
             "Taux d'attribution (année)",
             f"{taux_attribution_annuel:.0%}" if pd.notna(taux_attribution_annuel) else "–",
-            help="Heures attribuées à un dossier (pointages) / temps théorique total de "
-                 "travail opérateur (nb opérateurs × 39 h, cumulé sur l'année). "
-                 "Répond à : sur le temps travaillé par les opérateurs, quelle part "
-                 "est attribuée à un dossier client ?",
+            help="Nombre total d'heures attribuées à un dossier (pointages de l'année) "
+                 "÷ Temps travaillé théorique (voir indicateur ci-contre). "
+                 "Répond à : sur le temps que les opérateurs auraient dû travailler, "
+                 "quelle part a effectivement été attribuée à un dossier client ?",
         )
-        kk2.metric(
+
+        # Ligne 2 : volumes d'heures totaux + ratio travaillé/devisé
+        r2c1, r2c2, r2c3 = st.columns(3)
+        r2c1.metric(
+            "Nombre total d'heures devisées",
+            f"{devis_total_annee:.1f} h",
+            help="Somme des heures devisées (temps prévu au devis) sur l'ensemble "
+                 f"des dossiers clôturés en {annee_choisie}.",
+        )
+        r2c2.metric(
+            "Nombre total d'heures travaillées",
+            f"{travaille_total_annee:.1f} h",
+            help="Somme des heures réellement travaillées (pointées par les opérateurs) "
+                 f"sur l'ensemble des dossiers clôturés en {annee_choisie}.",
+        )
+        r2c3.metric(
             "Ratio travaillé / devisé moyen par dossier",
             f"{ratio_travaille_devis_moyen_dossier:.0%}" if pd.notna(ratio_travaille_devis_moyen_dossier) else "–",
             help="Moyenne, sur tous les dossiers clôturés dans l'année, du ratio "
-                 "(heures travaillées / heures devisées) de chaque dossier. "
+                 "(heures travaillées ÷ heures devisées) de chaque dossier. "
                  "Répond à : passe-t-on en général plus de temps que prévu sur un dossier ? "
-                 "(>100% = dépassement du devis, <100% = dossier réalisé plus vite que prévu)",
+                 "(>100 % = dépassement du devis, <100 % = dossier réalisé plus vite que prévu).",
         )
 
-        st.markdown("**Détail des heures**")
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Nombre de dossiers clôturés", f"{nb_dossiers_annee}")
-        k2.metric("Nombre total d'heures devisées", f"{devis_total_annee:.1f} h")
-        k3.metric("Nombre total d'heures travaillées", f"{travaille_total_annee:.1f} h")
+        # Ligne 3 : moyennes par dossier
+        r3c1, r3c2, r3c3 = st.columns(3)
+        r3c1.metric(
+            "Heures devisées moy. / dossier",
+            f"{devis_moyen_dossier:.1f} h",
+            help="Nombre total d'heures devisées ÷ nombre de dossiers clôturés.",
+        )
+        r3c2.metric(
+            "Heures travaillées moy. / dossier",
+            f"{travaille_moyen_dossier:.1f} h",
+            help="Nombre total d'heures travaillées ÷ nombre de dossiers clôturés.",
+        )
 
-        k4, k5 = st.columns(2)
-        k4.metric("Heures devisées moy. / dossier", f"{devis_moyen_dossier:.1f} h")
-        k5.metric("Heures travaillées moy. / dossier", f"{travaille_moyen_dossier:.1f} h")
+        # Ligne 4 : nombre de dossiers
+        r4c1, r4c2, r4c3 = st.columns(3)
+        r4c1.metric(
+            "Nombre de dossiers clôturés",
+            f"{nb_dossiers_annee}",
+            help=f"Nombre de dossiers avec le statut « Clos » et une date de clôture en {annee_choisie}.",
+        )
 
         # -------------------------------------------------------------------
         # Temps par poste
