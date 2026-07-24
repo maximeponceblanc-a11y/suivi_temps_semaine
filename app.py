@@ -641,6 +641,21 @@ with tab_annuel:
         moyenne_operateurs_semaine = weekly["nb_operateurs"].mean()
         temps_travaille_theorique_annuel = weekly["temps_theorique"].sum()
 
+        # Nombre total d'heures attribuées = somme de tous les pointages de l'année
+        # (indépendamment du statut des dossiers), déjà utilisée pour le graphique
+        # "Nombre d'heures attribuées par semaine" ci-dessous.
+        heures_attribuees_total_annee = weekly["heures_attribuees"].sum()
+
+        # Taux d'attribution (année) = heures attribuées (pointées) / temps théorique,
+        # calculé sur les TOTAUX annuels (et non comme une moyenne des taux hebdomadaires).
+        # Par construction : Temps travaillé théorique x Taux d'attribution (année)
+        #                    = Nombre total d'heures attribuées.
+        taux_attribution_annuel = (
+            heures_attribuees_total_annee / temps_travaille_theorique_annuel
+            if temps_travaille_theorique_annuel > 0
+            else float("nan")
+        )
+
         col_a1, col_a2 = st.columns(2)
 
         with col_a1:
@@ -679,9 +694,21 @@ with tab_annuel:
                 annotation_position="top left",
             )
             st.plotly_chart(fig_taux_semaine, use_container_width=True, key="line_taux_par_semaine_annuel")
+            st.caption(
+                f"ℹ️ La ligne « Moyenne » ({moyenne_taux_semaine:.0%}) est la moyenne simple "
+                f"des taux hebdomadaires (chaque semaine compte pour 1, peu importe son volume "
+                f"d'heures). Le « Taux d'attribution (année) » affiché plus bas "
+                f"({taux_attribution_annuel:.0%}) est légèrement différent : c'est le total des "
+                "heures attribuées sur l'année divisé par le total du temps théorique — chaque "
+                "semaine y pèse en fonction de son volume réel d'heures, pas de façon égale. "
+                "Les deux sont corrects, ils répondent juste à une pondération différente."
+            )
     else:
         st.info("Aucun pointage sur l'année sélectionnée.")
         temps_travaille_theorique_annuel = float("nan")
+        heures_attribuees_total_annee = float("nan")
+        taux_attribution_annuel = float("nan")
+        moyenne_taux_semaine = float("nan")
         nb_semaines_ytd = 0
         moyenne_operateurs_semaine = float("nan")
 
@@ -705,27 +732,19 @@ with tab_annuel:
         devis_moyen_dossier = devis_total_annee / nb_dossiers_annee if nb_dossiers_annee else 0
         travaille_moyen_dossier = travaille_total_annee / nb_dossiers_annee if nb_dossiers_annee else 0
 
-        # Ratio travaillé/devisé par dossier : répond à « passe-t-on plus de temps
-        # que prévu sur un dossier ? » — à ne pas confondre avec le taux d'attribution.
-        ratios_dossier = (
-            par_dossier_annee["temps_operateurs_h"]
-            / par_dossier_annee["temps_devis_h"].replace(0, float("nan"))
-        )
-        ratio_travaille_devis_moyen_dossier = ratios_dossier.mean()
-
-        # Taux d'attribution (année) = heures devisées (= heures attribuées à un dossier
-        # au moment du devis) / temps travaillé théorique (nb opérateurs x 39h, cumulé
-        # semaine par semaine sur l'année). Par construction :
-        # devis_total_annee / temps_travaille_theorique_annuel == taux_attribution_annuel
-        taux_attribution_annuel = (
-            devis_total_annee / temps_travaille_theorique_annuel
-            if pd.notna(temps_travaille_theorique_annuel) and temps_travaille_theorique_annuel > 0
+        # Écart relatif entre heures travaillées et heures devisées, calculé sur les
+        # TOTAUX (et non comme une moyenne de ratios par dossier), afin que :
+        # Nombre total d'heures travaillées / Nombre total d'heures devisées
+        # = 1 + écart relatif, exactement.
+        ecart_relatif_devis_travaille = (
+            (travaille_total_annee - devis_total_annee) / devis_total_annee
+            if devis_total_annee > 0
             else float("nan")
         )
 
-        st.markdown("**Les deux indicateurs clés**")
+        st.markdown("**Les indicateurs clés**")
 
-        # Ligne 1 : temps théorique & taux d'attribution
+        # Ligne 1 : temps théorique, heures attribuées, taux d'attribution
         r1c1, r1c2, r1c3 = st.columns(3)
         r1c1.metric(
             "Temps travaillé théorique",
@@ -739,58 +758,70 @@ with tab_annuel:
                  "sur la période (base 39 h/semaine/opérateur).",
         )
         r1c2.metric(
+            "Nombre total d'heures attribuées",
+            f"{heures_attribuees_total_annee:.1f} h" if pd.notna(heures_attribuees_total_annee) else "–",
+            help="Somme de tous les pointages opérateurs de l'année (feuille "
+                 "« temps_reel_operateur »), tous dossiers confondus, indépendamment de "
+                 "leur statut (clos ou non). C'est le numérateur du taux d'attribution "
+                 "et la même donnée que le graphique « Nombre d'heures attribuées par "
+                 "semaine » ci-dessus (mais cumulée sur l'année entière).",
+        )
+        r1c3.metric(
             "Taux d'attribution (année)",
             f"{taux_attribution_annuel:.0%}" if pd.notna(taux_attribution_annuel) else "–",
-            help="Nombre total d'heures devisées (= heures attribuées à un dossier lors "
-                 "du devis) ÷ Temps travaillé théorique (indicateur ci-contre). "
+            help="Nombre total d'heures attribuées ÷ Temps travaillé théorique. "
                  "Répond à : sur le temps que les opérateurs auraient dû travailler, "
-                 "quelle part a été attribuée à un dossier client ? "
-                 "Par construction : Nombre total d'heures devisées ÷ Temps travaillé "
-                 "théorique = Taux d'attribution (année).",
+                 "quelle part a effectivement été attribuée (pointée) à un dossier ? "
+                 "Par construction : Temps travaillé théorique × Taux d'attribution "
+                 "(année) = Nombre total d'heures attribuées.",
         )
 
-        # Ligne 2 : volumes d'heures totaux + ratio travaillé/devisé
+        # Ligne 2 : dossiers clôturés, devisé, travaillé
         r2c1, r2c2, r2c3 = st.columns(3)
         r2c1.metric(
+            "Nombre de dossiers clôturés",
+            f"{nb_dossiers_annee}",
+            help=f"Nombre de dossiers avec le statut « Clos » et une date de clôture en {annee_choisie}.",
+        )
+        r2c2.metric(
             "Nombre total d'heures devisées",
             f"{devis_total_annee:.1f} h",
             help="Somme des heures devisées (temps prévu au devis) sur l'ensemble "
                  f"des dossiers clôturés en {annee_choisie}.",
         )
-        r2c2.metric(
+        r2c3.metric(
             "Nombre total d'heures travaillées",
             f"{travaille_total_annee:.1f} h",
-            help="Somme des heures réellement travaillées (pointées par les opérateurs) "
-                 f"sur l'ensemble des dossiers clôturés en {annee_choisie}.",
-        )
-        r2c3.metric(
-            "Ratio travaillé / devisé moyen par dossier",
-            f"{ratio_travaille_devis_moyen_dossier:.0%}" if pd.notna(ratio_travaille_devis_moyen_dossier) else "–",
-            help="Moyenne, sur tous les dossiers clôturés dans l'année, du ratio "
-                 "(heures travaillées ÷ heures devisées) de chaque dossier. "
-                 "Répond à : passe-t-on en général plus de temps que prévu sur un dossier ? "
-                 "(>100 % = dépassement du devis, <100 % = dossier réalisé plus vite que prévu).",
+            help="Somme des heures réellement travaillées, telles qu'enregistrées sur "
+                 f"les ordres de fabrication des dossiers clôturés en {annee_choisie}. "
+                 "⚠️ Cette donnée porte uniquement sur les dossiers clôturés cette année : "
+                 "elle diffère donc du « Nombre total d'heures attribuées » ci-dessus, qui "
+                 "porte sur tous les pointages de l'année, y compris ceux liés à des "
+                 "dossiers pas encore clôturés.",
         )
 
-        # Ligne 3 : moyennes par dossier
+        # Ligne 3 : écart relatif, moyennes par dossier
         r3c1, r3c2, r3c3 = st.columns(3)
         r3c1.metric(
+            "Écart relatif travaillé / devisé",
+            f"{ecart_relatif_devis_travaille:+.1%}" if pd.notna(ecart_relatif_devis_travaille) else "–",
+            help="(Nombre total d'heures travaillées − Nombre total d'heures devisées) "
+                 "÷ Nombre total d'heures devisées, calculé sur l'ensemble des dossiers "
+                 "clôturés dans l'année. Répond à : en général, dépasse-t-on le devis ou "
+                 "le dossier est-il réalisé plus vite que prévu ? "
+                 "(positif = dépassement global du devis, négatif = gain de temps global). "
+                 "Par construction : Nombre total d'heures travaillées ÷ Nombre total "
+                 "d'heures devisées = 1 + Écart relatif.",
+        )
+        r3c2.metric(
             "Heures devisées moy. / dossier",
             f"{devis_moyen_dossier:.1f} h",
             help="Nombre total d'heures devisées ÷ nombre de dossiers clôturés.",
         )
-        r3c2.metric(
+        r3c3.metric(
             "Heures travaillées moy. / dossier",
             f"{travaille_moyen_dossier:.1f} h",
             help="Nombre total d'heures travaillées ÷ nombre de dossiers clôturés.",
-        )
-
-        # Ligne 4 : nombre de dossiers
-        r4c1, r4c2, r4c3 = st.columns(3)
-        r4c1.metric(
-            "Nombre de dossiers clôturés",
-            f"{nb_dossiers_annee}",
-            help=f"Nombre de dossiers avec le statut « Clos » et une date de clôture en {annee_choisie}.",
         )
 
         # -------------------------------------------------------------------
