@@ -633,21 +633,13 @@ with tab_annuel:
         moyenne_heures_semaine = weekly["heures_attribuees"].mean()
         moyenne_taux_semaine = weekly["taux_attribution"].mean()
 
-        # Temps travaillé théorique = nombre moyen d'opérateurs par semaine
-        # x nombre de semaines depuis le début de l'année x 39h
-        # (équivaut à la somme, semaine par semaine, de nb_operateurs x 39h)
+        # Temps travaillé théorique = somme, semaine par semaine, du temps théorique
+        # calculé exactement comme dans l'onglet "Suivi hebdomadaire"
+        # (nb d'opérateurs distincts ayant pointé cette semaine-là x 39h),
+        # additionné sur toutes les semaines de l'année où au moins un pointage existe.
         nb_semaines_ytd = len(weekly)
         moyenne_operateurs_semaine = weekly["nb_operateurs"].mean()
         temps_travaille_theorique_annuel = weekly["temps_theorique"].sum()
-
-        # Taux d'attribution annuel = heures attribuées / temps théorique total de l'année
-        # (répond à : sur le temps travaillé par les opérateurs, quelle part est
-        # attribuée à un dossier client ?)
-        taux_attribution_annuel = (
-            weekly["heures_attribuees"].sum() / temps_travaille_theorique_annuel
-            if temps_travaille_theorique_annuel > 0
-            else float("nan")
-        )
 
         col_a1, col_a2 = st.columns(2)
 
@@ -689,8 +681,9 @@ with tab_annuel:
             st.plotly_chart(fig_taux_semaine, use_container_width=True, key="line_taux_par_semaine_annuel")
     else:
         st.info("Aucun pointage sur l'année sélectionnée.")
-        taux_attribution_annuel = float("nan")
         temps_travaille_theorique_annuel = float("nan")
+        nb_semaines_ytd = 0
+        moyenne_operateurs_semaine = float("nan")
 
     # -----------------------------------------------------------------------
     # Indicateurs généraux de l'année
@@ -720,6 +713,16 @@ with tab_annuel:
         )
         ratio_travaille_devis_moyen_dossier = ratios_dossier.mean()
 
+        # Taux d'attribution (année) = heures devisées (= heures attribuées à un dossier
+        # au moment du devis) / temps travaillé théorique (nb opérateurs x 39h, cumulé
+        # semaine par semaine sur l'année). Par construction :
+        # devis_total_annee / temps_travaille_theorique_annuel == taux_attribution_annuel
+        taux_attribution_annuel = (
+            devis_total_annee / temps_travaille_theorique_annuel
+            if pd.notna(temps_travaille_theorique_annuel) and temps_travaille_theorique_annuel > 0
+            else float("nan")
+        )
+
         st.markdown("**Les deux indicateurs clés**")
 
         # Ligne 1 : temps théorique & taux d'attribution
@@ -727,19 +730,23 @@ with tab_annuel:
         r1c1.metric(
             "Temps travaillé théorique",
             f"{temps_travaille_theorique_annuel:.0f} h" if pd.notna(temps_travaille_theorique_annuel) else "–",
-            help="Nombre moyen d'opérateurs actifs par semaine × nombre de semaines "
-                 "écoulées depuis le début de l'année × 39 h. C'est le volume d'heures "
-                 f"que l'ensemble des opérateurs aurait dû produire en théorie sur les "
-                 f"{nb_semaines_ytd if not pd.isna(nb_semaines_ytd) else '–'} semaines de l'année "
-                 "(base 39 h/semaine/opérateur).",
+            help="Somme, semaine par semaine, du nombre d'opérateurs distincts ayant "
+                 "pointé cette semaine-là × 39 h (calcul identique à celui de l'onglet "
+                 f"« Suivi hebdomadaire »). Sur les {nb_semaines_ytd} semaines de l'année "
+                 f"comportant au moins un pointage, cela représente en moyenne "
+                 f"{moyenne_operateurs_semaine:.1f} opérateur(s) actif(s) par semaine. "
+                 "C'est le volume d'heures que l'effectif aurait dû produire en théorie "
+                 "sur la période (base 39 h/semaine/opérateur).",
         )
         r1c2.metric(
             "Taux d'attribution (année)",
             f"{taux_attribution_annuel:.0%}" if pd.notna(taux_attribution_annuel) else "–",
-            help="Nombre total d'heures attribuées à un dossier (pointages de l'année) "
-                 "÷ Temps travaillé théorique (voir indicateur ci-contre). "
+            help="Nombre total d'heures devisées (= heures attribuées à un dossier lors "
+                 "du devis) ÷ Temps travaillé théorique (indicateur ci-contre). "
                  "Répond à : sur le temps que les opérateurs auraient dû travailler, "
-                 "quelle part a effectivement été attribuée à un dossier client ?",
+                 "quelle part a été attribuée à un dossier client ? "
+                 "Par construction : Nombre total d'heures devisées ÷ Temps travaillé "
+                 "théorique = Taux d'attribution (année).",
         )
 
         # Ligne 2 : volumes d'heures totaux + ratio travaillé/devisé
