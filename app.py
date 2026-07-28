@@ -26,6 +26,16 @@ MS_PER_HOUR = 3_600_000  # les durées "temps_devis" / "temps_operateurs" / "dur
                          # sont stockées en millisecondes dans le fichier source
 
 # ---------------------------------------------------------------------------
+# Palette de couleurs commune à tous les graphiques "devisé vs réalisé"
+# ---------------------------------------------------------------------------
+COULEUR_REALISE = "#0068C9"  # bleu foncé
+COULEUR_DEVISE = "#83C9FF"   # bleu clair
+COLOR_MAP_DEVIS_REALISE = {
+    "Temps réalisé": COULEUR_REALISE,
+    "Temps devisé": COULEUR_DEVISE,
+}
+
+# ---------------------------------------------------------------------------
 # Chargement des données
 # ---------------------------------------------------------------------------
 
@@ -280,17 +290,18 @@ with tab_hebdo:
         par_poste = (
             of_semaine.groupby("poste")[["temps_operateurs_h", "temps_devis_h"]]
             .sum()
-            .rename(columns={"temps_operateurs_h": "Temps de production", "temps_devis_h": "Temps devis"})
-            .sort_values("Temps devis", ascending=True)
+            .rename(columns={"temps_operateurs_h": "Temps réalisé", "temps_devis_h": "Temps devisé"})
+            .sort_values("Temps devisé", ascending=True)
             .reset_index()
         )
         fig_poste = px.bar(
             par_poste,
             y="poste",
-            x=["Temps de production", "Temps devis"],
+            x=["Temps réalisé", "Temps devisé"],
             orientation="h",
             barmode="group",
             labels={"value": "Heures", "poste": "", "variable": ""},
+            color_discrete_map=COLOR_MAP_DEVIS_REALISE,
         )
         fig_poste.update_layout(legend_title_text="")
         st.plotly_chart(fig_poste, use_container_width=True, key="bar_temps_par_poste")
@@ -306,17 +317,18 @@ with tab_hebdo:
         par_dossier = (
             of_semaine_label.groupby("dossier_client")[["temps_operateurs_h", "temps_devis_h"]]
             .sum()
-            .rename(columns={"temps_operateurs_h": "Temps de production", "temps_devis_h": "Temps devis"})
-            .sort_values("Temps devis", ascending=True)
+            .rename(columns={"temps_operateurs_h": "Temps réalisé", "temps_devis_h": "Temps devisé"})
+            .sort_values("Temps devisé", ascending=True)
             .reset_index()
         )
         fig_dossier = px.bar(
             par_dossier,
             y="dossier_client",
-            x=["Temps de production", "Temps devis"],
+            x=["Temps réalisé", "Temps devisé"],
             orientation="h",
             barmode="group",
             labels={"value": "Heures", "dossier_client": "", "variable": ""},
+            color_discrete_map=COLOR_MAP_DEVIS_REALISE,
         )
         fig_dossier.update_layout(legend_title_text="", height=max(300, 40 * len(par_dossier)))
         st.plotly_chart(fig_dossier, use_container_width=True, key="bar_temps_par_dossier")
@@ -476,8 +488,8 @@ with tab_hebdo:
             par_poste_spec = (
                 spec_of.groupby("poste", dropna=False)[["temps_operateurs_h", "temps_devis_h"]]
                 .sum()
-                .rename(columns={"temps_operateurs_h": "Temps de production", "temps_devis_h": "Temps devis"})
-                .sort_values("Temps devis", ascending=True)
+                .rename(columns={"temps_operateurs_h": "Temps réalisé", "temps_devis_h": "Temps devisé"})
+                .sort_values("Temps devisé", ascending=True)
                 .reset_index()
             )
             par_poste_spec["poste"] = par_poste_spec["poste"].fillna("Non défini")
@@ -485,10 +497,11 @@ with tab_hebdo:
             fig_poste_spec = px.bar(
                 par_poste_spec,
                 y="poste",
-                x=["Temps de production", "Temps devis"],
+                x=["Temps réalisé", "Temps devisé"],
                 orientation="h",
                 barmode="group",
-                labels={"value": "Heures", "poste": "Poste", "variable": "Type de temps"}
+                labels={"value": "Heures", "poste": "Poste", "variable": ""},
+                color_discrete_map=COLOR_MAP_DEVIS_REALISE,
             )
             fig_poste_spec.update_layout(legend_title_text="")
             st.plotly_chart(fig_poste_spec, use_container_width=True, key=f"bar_spec_{dossier_choisi}")
@@ -831,7 +844,7 @@ with tab_annuel:
         par_poste_annee = (
             of_annee.groupby("poste", dropna=False)[["temps_devis_h", "temps_operateurs_h"]]
             .sum()
-            .rename(columns={"temps_devis_h": "Temps devisé", "temps_operateurs_h": "Temps pointé"})
+            .rename(columns={"temps_devis_h": "Temps devisé", "temps_operateurs_h": "Temps réalisé"})
             .sort_values("Temps devisé", ascending=True)
             .reset_index()
         )
@@ -840,11 +853,12 @@ with tab_annuel:
         fig_poste_annee = px.bar(
             par_poste_annee,
             y="poste",
-            x=["Temps devisé", "Temps pointé"],
+            x=["Temps réalisé", "Temps devisé"],
             orientation="h",
             barmode="group",
             labels={"value": "Heures", "poste": "", "variable": ""},
             height=max(300, 35 * len(par_poste_annee)),
+            color_discrete_map=COLOR_MAP_DEVIS_REALISE,
         )
         fig_poste_annee.update_layout(legend_title_text="")
         st.plotly_chart(fig_poste_annee, use_container_width=True, key="bar_temps_par_poste_annuel")
@@ -865,11 +879,12 @@ with tab_annuel:
         fig_operation_annee = px.bar(
             par_operation_annee,
             y="operation",
-            x=["Temps devisé", "Temps réalisé"],
+            x=["Temps réalisé", "Temps devisé"],
             orientation="h",
             barmode="group",
             labels={"value": "Heures", "operation": "", "variable": ""},
             height=max(300, 35 * len(par_operation_annee)),
+            color_discrete_map=COLOR_MAP_DEVIS_REALISE,
         )
         fig_operation_annee.update_layout(legend_title_text="")
         st.plotly_chart(fig_operation_annee, use_container_width=True, key="bar_temps_par_operation_annuel")
