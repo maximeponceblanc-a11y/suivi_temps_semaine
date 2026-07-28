@@ -58,6 +58,8 @@ def load_data(file_bytes: bytes):
     iso = df_pointages["heure_debut"].dt.isocalendar()
     df_pointages["iso_year"] = iso["year"]
     df_pointages["iso_week"] = iso["week"]
+    df_pointages["cal_year"] = df_pointages["heure_debut"].dt.year
+    df_pointages["cal_month"] = df_pointages["heure_debut"].dt.month
 
     # --- Feuille des ordres de fabrication --------------------------------------
     df_of = pd.read_excel(xls, sheet_name="ordres_fabrication")
@@ -68,6 +70,8 @@ def load_data(file_bytes: bytes):
     iso_of = df_of["date_cloture"].dt.isocalendar()
     df_of["iso_year"] = iso_of["year"]
     df_of["iso_week"] = iso_of["week"]
+    df_of["cal_year"] = df_of["date_cloture"].dt.year
+    df_of["cal_month"] = df_of["date_cloture"].dt.month
 
     # --- Jointure dossier -> client (via numero_dossier de ordres_fabrication) --
     client_map = (
@@ -94,6 +98,40 @@ def week_bounds(iso_year: int, iso_week: int) -> tuple[date, date]:
     monday = date.fromisocalendar(int(iso_year), int(iso_week), 1)
     sunday = monday + timedelta(days=6)
     return monday, sunday
+
+
+NOMS_MOIS = [
+    "Janvier", "Février", "Mars", "Avril", "Mai", "Juin",
+    "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre",
+]
+
+
+def month_bounds(year: int, month: int) -> tuple[date, date]:
+    """Retourne (1er jour, dernier jour) du mois calendaire demandé."""
+    first_day = date(int(year), int(month), 1)
+    if month == 12:
+        next_month_first_day = date(int(year) + 1, 1, 1)
+    else:
+        next_month_first_day = date(int(year), int(month) + 1, 1)
+    last_day = next_month_first_day - timedelta(days=1)
+    return first_day, last_day
+
+
+def build_month_options(df_pointages: pd.DataFrame, df_of: pd.DataFrame) -> pd.DataFrame:
+    """Construit la liste des mois disponibles à partir des deux feuilles."""
+    months_a = df_pointages.dropna(subset=["cal_year", "cal_month"])[["cal_year", "cal_month"]]
+    months_b = df_of.dropna(subset=["cal_year", "cal_month"])[["cal_year", "cal_month"]]
+    months = pd.concat([months_a, months_b], ignore_index=True).drop_duplicates()
+    months = months.sort_values(["cal_year", "cal_month"], ascending=[False, False])
+
+    labels = []
+    for _, row in months.iterrows():
+        labels.append(
+            f"{NOMS_MOIS[int(row['cal_month']) - 1]} {int(row['cal_year'])}"
+        )
+    months = months.copy()
+    months["label"] = labels
+    return months.reset_index(drop=True)
 
 
 def build_week_options(df_pointages: pd.DataFrame, df_of: pd.DataFrame) -> pd.DataFrame:
@@ -159,7 +197,9 @@ except Exception as e:
 # Onglets — Suivi hebdomadaire / Bilan annuel
 # ---------------------------------------------------------------------------
 
-tab_hebdo, tab_annuel = st.tabs(["📊 Suivi hebdomadaire", "📅 Bilan annuel"])
+tab_hebdo, tab_mensuel, tab_annuel = st.tabs(
+    ["📊 Suivi hebdomadaire", "📆 Suivi mensuel", "📅 Bilan annuel"]
+)
 
 with tab_hebdo:
 
@@ -573,6 +613,427 @@ with tab_hebdo:
                 )
             )
             st.dataframe(styled_table_spec_of, use_container_width=True, hide_index=True)
+            st.caption(
+                "⬜ Opération non pointée (0h) · "
+                "🟥 Écart trop positif (dépassement d'heures) · "
+                "🟧 Écart trop négatif (dossier plus rapide que prévu) · "
+                "🟩 Écart nul ou faible, dans la tolérance."
+            )
+
+        else:
+            st.warning("Ce dossier est introuvable dans la liste globale des ordres de fabrication.")
+
+# ---------------------------------------------------------------------------
+# Onglet — Suivi mensuel
+# ---------------------------------------------------------------------------
+
+with tab_mensuel:
+
+    # ---------------------------------------------------------------------------
+    # Sélecteur de mois
+    # ---------------------------------------------------------------------------
+
+    months_df = build_month_options(df_pointages, df_of)
+    if months_df.empty:
+        st.warning("Aucun mois exploitable n'a été trouvé dans le fichier.")
+        st.stop()
+
+    with st.sidebar:
+        st.header("🗓️ Mois")
+        selected_label_mois = st.selectbox(
+            "Sélectionner un mois", months_df["label"], key="select_mois"
+        )
+
+    selected_row_mois = months_df.loc[months_df["label"] == selected_label_mois].iloc[0]
+    sel_year_m, sel_month = int(selected_row_mois["cal_year"]), int(selected_row_mois["cal_month"])
+    premier_jour, dernier_jour = month_bounds(sel_year_m, sel_month)
+
+    st.caption(f"Mois sélectionné : **du {premier_jour.strftime('%d/%m/%Y')} au {dernier_jour.strftime('%d/%m/%Y')}**")
+    st.caption(
+        f"🕒 Dernière date de clôture présente dans le fichier chargé : "
+        f"**{df_of['date_cloture'].max().strftime('%d/%m/%Y') if df_of['date_cloture'].notna().any() else 'aucune'}** "
+        f"— si cette date vous semble ancienne, cliquez sur « Vider le cache et recharger »."
+    )
+
+    # ---------------------------------------------------------------------------
+    # Filtrage des données du mois
+    # ---------------------------------------------------------------------------
+
+    mask_pointages_m = (df_pointages["cal_year"] == sel_year_m) & (df_pointages["cal_month"] == sel_month)
+    pointages_mois = df_pointages.loc[mask_pointages_m].copy()
+
+    mask_of_m = (
+        (df_of["cal_year"] == sel_year_m)
+        & (df_of["cal_month"] == sel_month)
+        & (df_of["statut_production"] == "Clos")  # ne garder que les dossiers réellement clôturés
+    )
+    of_mois = df_of.loc[mask_of_m].copy()
+
+    # ---------------------------------------------------------------------------
+    # Indicateurs — activité des opérateurs
+    # ---------------------------------------------------------------------------
+
+    heures_attribuees_m = pointages_mois["Durée h"].sum()
+    nb_operateurs_m = pointages_mois["id_operateur"].nunique()
+    temps_theorique_m = nb_operateurs_m * 39
+    taux_attribution_m = (heures_attribuees_m / temps_theorique_m) if temps_theorique_m > 0 else 0
+
+    st.subheader("👷 Activité des opérateurs")
+    cm1, cm2, cm3, cm4 = st.columns(4)
+    cm1.metric("Nombre d'heures attribuées", f"{heures_attribuees_m:.1f} h")
+    cm2.metric("Opérateurs ayant pointé", f"{nb_operateurs_m}")
+    cm3.metric("Temps travaillé théorique", f"{temps_theorique_m:.0f} h", help="Nombre d'opérateurs ayant pointé × 39 h")
+    cm4.metric("Taux d'attribution", f"{taux_attribution_m:.0%}", help="Heures attribuées / (35 × nb opérateurs)")
+
+    col_pie1_m, col_pie2_m = st.columns(2)
+
+    with col_pie1_m:
+        st.markdown("**Répartition des heures par dossier**")
+        if not pointages_mois.empty:
+            data1_m = pie_top_n(pointages_mois, "dossier_client", "Durée h")
+            fig1_m = px.pie(data1_m, names="dossier_client", values="Durée h", hole=0.35)
+            fig1_m.update_traces(textposition="inside", textinfo="percent+label")
+            st.plotly_chart(fig1_m, use_container_width=True, key="pie_heures_par_dossier_mensuel")
+        else:
+            st.info("Aucun pointage sur ce mois.")
+
+    with col_pie2_m:
+        st.markdown("**Répartition du nombre d'heures par opérateur**")
+        if not pointages_mois.empty:
+            data2_m = pie_top_n(pointages_mois, "id_operateur", "Durée h")
+            fig2_m = px.pie(data2_m, names="id_operateur", values="Durée h", hole=0.35)
+            fig2_m.update_traces(
+                textposition="inside",
+                textinfo="label+percent",
+                texttemplate="%{label}<br>%{value:.1f} h (%{percent})",
+            )
+            st.plotly_chart(fig2_m, use_container_width=True, key="pie_heures_par_operateur_mensuel")
+        else:
+            st.info("Aucun pointage sur ce mois.")
+
+    st.caption(
+        "ℹ️ Dans le fichier source, le champ « ordre de fabrication » des pointages correspond "
+        "au numéro de dossier."
+    )
+
+    st.markdown("**Détail des pointages du mois**")
+    if not pointages_mois.empty:
+        table_pointages_m = pointages_mois[
+            ["id", "created_at", "id_operateur", "operation", "ordre_fabrication", "heure_debut", "heure_fin", "Durée h"]
+        ].sort_values("heure_debut", ascending=False).reset_index(drop=True)
+        table_pointages_m["Durée h"] = table_pointages_m["Durée h"].round(2)
+        st.dataframe(table_pointages_m, use_container_width=True, hide_index=True, key="df_pointages_mensuel")
+    else:
+        st.info("Aucun pointage sur ce mois.")
+
+    # ---------------------------------------------------------------------------
+    # Indicateurs — dossiers clôturés dans le mois
+    # ---------------------------------------------------------------------------
+
+    st.divider()
+    st.subheader("📦 Dossiers clôturés ce mois")
+
+    heures_livrees_m = of_mois["temps_operateurs_h"].sum()
+    heures_theoriques_m = of_mois["temps_devis_h"].sum()
+    ratio_temps_m = (heures_livrees_m / heures_theoriques_m) if heures_theoriques_m > 0 else 0
+    nb_dossiers_clotures_m = of_mois["numero_dossier"].nunique()
+
+    dm1, dm2, dm3, dm4 = st.columns(4)
+    dm1.metric("Nombre de dossiers clôturés", f"{nb_dossiers_clotures_m}")
+    dm2.metric("Heures livrées ce mois", f"{heures_livrees_m:.1f} h")
+    dm3.metric("Heures théoriques livrées ce mois", f"{heures_theoriques_m:.1f} h")
+    dm4.metric("Ratio temps (livré / théorique)", f"{ratio_temps_m:.0%}")
+
+    st.markdown("**Temps par poste**")
+    if not of_mois.empty:
+        par_poste_m = (
+            of_mois.groupby("poste")[["temps_operateurs_h", "temps_devis_h"]]
+            .sum()
+            .rename(columns={"temps_operateurs_h": "Temps réalisé", "temps_devis_h": "Temps devisé"})
+            .sort_values("Temps devisé", ascending=True)
+            .reset_index()
+        )
+        fig_poste_m = px.bar(
+            par_poste_m,
+            y="poste",
+            x=["Temps réalisé", "Temps devisé"],
+            orientation="h",
+            barmode="group",
+            labels={"value": "Heures", "poste": "", "variable": ""},
+            color_discrete_map=COLOR_MAP_DEVIS_REALISE,
+        )
+        fig_poste_m.update_layout(legend_title_text="")
+        st.plotly_chart(fig_poste_m, use_container_width=True, key="bar_temps_par_poste_mensuel")
+    else:
+        st.info("Aucun dossier clôturé sur ce mois.")
+
+    st.markdown("**Temps par dossier clôturé**")
+    if not of_mois.empty:
+        of_mois_label = of_mois.copy()
+        of_mois_label["dossier_client"] = (
+            of_mois_label["numero_dossier"].astype(str) + " – " + of_mois_label["client"].fillna("Client inconnu")
+        )
+        par_dossier_m = (
+            of_mois_label.groupby("dossier_client")[["temps_operateurs_h", "temps_devis_h"]]
+            .sum()
+            .rename(columns={"temps_operateurs_h": "Temps réalisé", "temps_devis_h": "Temps devisé"})
+            .sort_values("Temps devisé", ascending=True)
+            .reset_index()
+        )
+        fig_dossier_m = px.bar(
+            par_dossier_m,
+            y="dossier_client",
+            x=["Temps réalisé", "Temps devisé"],
+            orientation="h",
+            barmode="group",
+            labels={"value": "Heures", "dossier_client": "", "variable": ""},
+            color_discrete_map=COLOR_MAP_DEVIS_REALISE,
+        )
+        fig_dossier_m.update_layout(legend_title_text="", height=max(300, 40 * len(par_dossier_m)))
+        st.plotly_chart(fig_dossier_m, use_container_width=True, key="bar_temps_par_dossier_mensuel")
+    else:
+        st.info("Aucun dossier clôturé sur ce mois.")
+
+    st.markdown("**Ordres de fabrication clôturés dans le mois**")
+    if not of_mois.empty:
+        # -----------------------------------------------------------------------
+        # Ajout du filtre sur le numéro de dossier
+        # -----------------------------------------------------------------------
+        dossiers_disponibles_m = sorted(
+            of_mois["numero_dossier"].dropna().astype(str).unique().tolist()
+        )
+
+        fm_col1, fm_col2 = st.columns([2, 1])
+        with fm_col1:
+            selected_dossiers_m = st.multiselect(
+                "🔎 Filtrer par numéro de dossier",
+                options=dossiers_disponibles_m,
+                default=[],
+                placeholder="Sélectionnez un ou plusieurs dossiers (laisser vide pour tout voir)",
+                key="filtre_dossiers_mensuel",
+            )
+
+        # Filtrage du dataframe selon la sélection
+        if selected_dossiers_m:
+            of_mois_filtered = of_mois[
+                of_mois["numero_dossier"].astype(str).isin(selected_dossiers_m)
+            ].copy()
+        else:
+            of_mois_filtered = of_mois.copy()
+
+        # -----------------------------------------------------------------------
+        # Construction du tableau avec les données filtrées
+        # -----------------------------------------------------------------------
+        if not of_mois_filtered.empty:
+            table_of_m = of_mois_filtered[
+                [
+                    "id",
+                    "created_at",
+                    "numero_devis",
+                    "numero_dossier",
+                    "client",
+                    "reference",
+                    "operation",
+                    "temps_devis_h",
+                    "temps_operateurs_h",
+                ]
+            ].rename(
+                columns={
+                    "temps_devis_h": "temps_devis (h)",
+                    "temps_operateurs_h": "temps_operateurs (h)",
+                }
+            ).sort_values("created_at", ascending=False).reset_index(drop=True)
+
+            table_of_m["temps_devis (h)"] = table_of_m["temps_devis (h)"].round(2)
+            table_of_m["temps_operateurs (h)"] = table_of_m["temps_operateurs (h)"].round(2)
+
+            # Delta = temps_operateurs - temps_devis (positif si heures en trop)
+            table_of_m["delta (h)"] = (
+                table_of_m["temps_operateurs (h)"] - table_of_m["temps_devis (h)"]
+            ).round(2)
+
+            # Ratio = (temps_operateurs - temps_devis) / temps_devis
+            table_of_m["ratio (opérateurs-devis)/devis (%)"] = (
+                table_of_m["delta (h)"]
+                / table_of_m["temps_devis (h)"].replace(0, float("nan"))
+                * 100
+            ).round(1)
+
+            ecart_pct_m = table_of_m["ratio (opérateurs-devis)/devis (%)"]
+
+            def highlight_row_mensuel(row):
+                pct = ecart_pct_m.loc[row.name]
+
+                # Opération non pointée (Gris)
+                if row["temps_operateurs (h)"] == 0:
+                    return ["background-color: #e2e3e5"] * len(row)
+
+                if pd.isna(pct):
+                    return [""] * len(row)
+                if pct > seuil_ecart:
+                    color = "background-color: #f8d7da"  # Rouge : plus long que prévu (dépassement)
+                elif pct < -seuil_ecart:
+                    color = "background-color: #ffe5b4"  # Orange : plus rapide que prévu (économie)
+                else:
+                    color = "background-color: #d4edda"  # Vert : dans la tolérance
+                return [color] * len(row)
+
+            styled_table_of_m = (
+                table_of_m.style.apply(highlight_row_mensuel, axis=1)
+                .format(
+                    {
+                        "temps_devis (h)": "{:.2f}",
+                        "temps_operateurs (h)": "{:.2f}",
+                        "delta (h)": "{:.2f}",
+                        "ratio (opérateurs-devis)/devis (%)": "{:.0f}%",
+                    },
+                    na_rep="–",
+                )
+            )
+            st.dataframe(styled_table_of_m, use_container_width=True, hide_index=True, key="df_of_mensuel")
+            st.caption(
+                "⬜ Opération non pointée (0h) · "
+                "🟥 Écart trop positif (dépassement d'heures) · "
+                "🟧 Écart trop négatif (dossier plus rapide que prévu) · "
+                "🟩 Écart nul ou faible, dans la tolérance."
+            )
+        else:
+            st.info("Aucun dossier ne correspond aux critères de recherche sélectionnés.")
+    else:
+        st.info("Aucun dossier clôturé sur ce mois.")
+
+
+    # ---------------------------------------------------------------------------
+    # Recherche et Analyse d'un dossier spécifique (Global)
+    # ---------------------------------------------------------------------------
+    st.divider()
+    st.header("🔍 Analyse d'un dossier spécifique")
+    st.markdown("Cette section permet de consulter les détails d'un dossier indépendamment du mois sélectionné (dossiers en cours, anciens, etc.).")
+
+    # 1. Récupérer la liste de tous les dossiers (sans le filtre du mois)
+    tous_les_dossiers_m = sorted(df_of["numero_dossier"].dropna().astype(str).unique().tolist())
+
+    # 2. Sélecteur de dossier
+    dossier_choisi_m = st.selectbox(
+        "Sélectionnez ou tapez le numéro d'un dossier :",
+        options=[""] + tous_les_dossiers_m,
+        format_func=lambda x: "Sélectionnez un dossier..." if x == "" else x,
+        help="Vous pouvez taper directement le numéro pour le trouver plus vite.",
+        key="select_dossier_mensuel",
+    )
+
+    if dossier_choisi_m != "":
+        # 3. Filtrer les données globales pour ce dossier spécifique
+        spec_of_m = df_of[df_of["numero_dossier"].astype(str) == dossier_choisi_m].copy()
+
+        if not spec_of_m.empty:
+            # En-tête du dossier
+            client_nom_m = spec_of_m["client"].iloc[0]
+            st.subheader(f"Dossier : {dossier_choisi_m} — {client_nom_m if pd.notna(client_nom_m) else 'Client inconnu'}")
+
+            # 4. Calcul des indicateurs globaux du dossier
+            devis_total_m = spec_of_m["temps_devis_h"].sum()
+            realise_total_m = spec_of_m["temps_operateurs_h"].sum()
+            ecart_total_m = realise_total_m - devis_total_m
+
+            c_spec1_m, c_spec2_m, c_spec3_m = st.columns(3)
+            c_spec1_m.metric("Temps devisé (Total)", f"{devis_total_m:.1f} h")
+            c_spec2_m.metric("Temps réalisé (Total)", f"{realise_total_m:.1f} h")
+
+            # Coloration de l'écart : Rouge si on dépasse le devis (>0), Vert si en dessous (<=0)
+            delta_color_m = "inverse" if ecart_total_m > 0 else "normal"
+            c_spec3_m.metric("Écart (Réalisé - Devis)", f"{ecart_total_m:.1f} h", delta_color=delta_color_m)
+
+            # 5. Graphique : Temps par poste
+            st.markdown("**Temps par poste**")
+            par_poste_spec_m = (
+                spec_of_m.groupby("poste", dropna=False)[["temps_operateurs_h", "temps_devis_h"]]
+                .sum()
+                .rename(columns={"temps_operateurs_h": "Temps réalisé", "temps_devis_h": "Temps devisé"})
+                .sort_values("Temps devisé", ascending=True)
+                .reset_index()
+            )
+            par_poste_spec_m["poste"] = par_poste_spec_m["poste"].fillna("Non défini")
+
+            fig_poste_spec_m = px.bar(
+                par_poste_spec_m,
+                y="poste",
+                x=["Temps réalisé", "Temps devisé"],
+                orientation="h",
+                barmode="group",
+                labels={"value": "Heures", "poste": "Poste", "variable": ""},
+                color_discrete_map=COLOR_MAP_DEVIS_REALISE,
+            )
+            fig_poste_spec_m.update_layout(legend_title_text="")
+            st.plotly_chart(fig_poste_spec_m, use_container_width=True, key=f"bar_spec_mensuel_{dossier_choisi_m}")
+
+            # 6. Tableau détaillé par opérations du dossier
+            st.markdown("**Détail des opérations (Ordres de Fabrication) de ce dossier**")
+
+            table_spec_of_m = spec_of_m[
+                [
+                    "id",
+                    "created_at",
+                    "numero_devis",
+                    "client",
+                    "reference",
+                    "operation",
+                    "temps_devis_h",
+                    "temps_operateurs_h",
+                ]
+            ].rename(
+                columns={
+                    "temps_devis_h": "temps_devis (h)",
+                    "temps_operateurs_h": "temps_operateurs (h)",
+                }
+            ).sort_values("created_at", ascending=False).reset_index(drop=True)
+
+            table_spec_of_m["temps_devis (h)"] = table_spec_of_m["temps_devis (h)"].round(2)
+            table_spec_of_m["temps_operateurs (h)"] = table_spec_of_m["temps_operateurs (h)"].round(2)
+
+            # Calculs Delta et Ratio (Inversés pour refléter le réalisé par rapport au devis)
+            table_spec_of_m["delta (h)"] = (
+                table_spec_of_m["temps_operateurs (h)"] - table_spec_of_m["temps_devis (h)"]
+            ).round(2)
+
+            table_spec_of_m["ratio (opérateurs-devis)/devis (%)"] = (
+                table_spec_of_m["delta (h)"]
+                / table_spec_of_m["temps_devis (h)"].replace(0, float("nan"))
+                * 100
+            ).round(1)
+
+            ecart_pct_spec_m = table_spec_of_m["ratio (opérateurs-devis)/devis (%)"]
+
+            def highlight_row_spec_mensuel(row):
+                pct = ecart_pct_spec_m.loc[row.name]
+
+                # Opération non pointée (Gris)
+                if row["temps_operateurs (h)"] == 0:
+                    return ["background-color: #e2e3e5"] * len(row)
+
+                if pd.isna(pct):
+                    return [""] * len(row)
+                if pct > seuil_ecart:
+                    color = "background-color: #f8d7da"  # Rouge : dépassement
+                elif pct < -seuil_ecart:
+                    color = "background-color: #ffe5b4"  # Orange : sous le devis
+                else:
+                    color = "background-color: #d4edda"  # Vert : dans la tolérance
+                return [color] * len(row)
+
+            styled_table_spec_of_m = (
+                table_spec_of_m.style.apply(highlight_row_spec_mensuel, axis=1)
+                .format(
+                    {
+                        "temps_devis (h)": "{:.2f}",
+                        "temps_operateurs (h)": "{:.2f}",
+                        "delta (h)": "{:.2f}",
+                        "ratio (opérateurs-devis)/devis (%)": "{:.0f}%",
+                    },
+                    na_rep="–",
+                )
+            )
+            st.dataframe(styled_table_spec_of_m, use_container_width=True, hide_index=True, key="df_spec_mensuel")
             st.caption(
                 "⬜ Opération non pointée (0h) · "
                 "🟥 Écart trop positif (dépassement d'heures) · "
