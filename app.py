@@ -12,6 +12,7 @@ Le fichier Excel source doit contenir au minimum les feuilles :
 import io
 from datetime import date, timedelta
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -115,6 +116,16 @@ def month_bounds(year: int, month: int) -> tuple[date, date]:
         next_month_first_day = date(int(year), int(month) + 1, 1)
     last_day = next_month_first_day - timedelta(days=1)
     return first_day, last_day
+
+
+def nb_jours_ouvres(premier_jour: date, dernier_jour: date) -> int:
+    """Retourne le nombre de jours ouvrés (lundi-vendredi) entre deux dates incluses.
+
+    Basé sur np.busday_count, qui exclut uniquement les samedis/dimanches
+    (les jours fériés ne sont pas pris en compte, faute de calendrier fourni).
+    """
+    # np.busday_count exclut la borne de fin -> on l'étend d'un jour
+    return int(np.busday_count(premier_jour, dernier_jour + timedelta(days=1)))
 
 
 def build_month_options(df_pointages: pd.DataFrame, df_of: pd.DataFrame) -> pd.DataFrame:
@@ -675,15 +686,24 @@ with tab_mensuel:
 
     heures_attribuees_m = pointages_mois["Durée h"].sum()
     nb_operateurs_m = pointages_mois["id_operateur"].nunique()
-    temps_theorique_m = nb_operateurs_m * 39
+    jours_ouvres_m = nb_jours_ouvres(premier_jour, dernier_jour)
+    temps_theorique_m = jours_ouvres_m * nb_operateurs_m * 7.8
     taux_attribution_m = (heures_attribuees_m / temps_theorique_m) if temps_theorique_m > 0 else 0
 
     st.subheader("👷 Activité des opérateurs")
     cm1, cm2, cm3, cm4 = st.columns(4)
     cm1.metric("Nombre d'heures attribuées", f"{heures_attribuees_m:.1f} h")
     cm2.metric("Opérateurs ayant pointé", f"{nb_operateurs_m}")
-    cm3.metric("Temps travaillé théorique", f"{temps_theorique_m:.0f} h", help="Nombre d'opérateurs ayant pointé × 39 h")
-    cm4.metric("Taux d'attribution", f"{taux_attribution_m:.0%}", help="Heures attribuées / (35 × nb opérateurs)")
+    cm3.metric(
+        "Temps travaillé théorique",
+        f"{temps_theorique_m:.0f} h",
+        help=f"{jours_ouvres_m} jours ouvrés × {nb_operateurs_m} opérateur(s) × 7,8 h",
+    )
+    cm4.metric(
+        "Taux d'attribution",
+        f"{taux_attribution_m:.0%}",
+        help="Heures attribuées / (jours ouvrés × nb opérateurs × 7,8 h)",
+    )
 
     col_pie1_m, col_pie2_m = st.columns(2)
 
