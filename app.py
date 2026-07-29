@@ -1300,99 +1300,158 @@ with tab_annuel:
         travaille_total_annee = par_dossier_annee["temps_operateurs_h"].sum()
 
         devis_moyen_dossier = devis_total_annee / nb_dossiers_annee if nb_dossiers_annee else 0
-        travaille_moyen_dossier = travaille_total_annee / nb_dossiers_annee if nb_dossiers_annee else 0
 
-        # Écart relatif entre heures travaillées et heures devisées, calculé sur les
-        # TOTAUX (et non comme une moyenne de ratios par dossier), afin que :
-        # Nombre total d'heures travaillées / Nombre total d'heures devisées
-        # = 1 + écart relatif, exactement.
+        # "Nombre total d'heures travaillées et livrées" = heures réellement
+        # travaillées sur les dossiers déjà clôturés (livrés) cette année.
+        heures_travaillees_livrees_annee = travaille_total_annee
+
+        # "Nombre total d'heures travaillées et non-livrées" = Nombre total d'heures
+        # attribuées (tous pointages de l'année, tous dossiers confondus) − Nombre
+        # total d'heures travaillées et livrées. Cela correspond à la somme des
+        # pointages de la feuille "temps_reel_operateur" qui sont rattachés à un
+        # dossier dont le statut n'est pas encore "Clos".
+        heures_travaillees_non_livrees_annee = (
+            heures_attribuees_total_annee - heures_travaillees_livrees_annee
+            if pd.notna(heures_attribuees_total_annee)
+            else float("nan")
+        )
+
+        # Écart relatif entre heures travaillées (et livrées) et heures devisées,
+        # calculé sur les TOTAUX (et non comme une moyenne de ratios par dossier),
+        # afin que : Nombre total d'heures travaillées et livrées / Nombre total
+        # d'heures devisées = 1 + écart relatif, exactement.
         ecart_relatif_devis_travaille = (
-            (travaille_total_annee - devis_total_annee) / devis_total_annee
+            (heures_travaillees_livrees_annee - devis_total_annee) / devis_total_annee
             if devis_total_annee > 0
             else float("nan")
         )
 
         st.markdown("**Les indicateurs clés**")
-
-        # Ligne 1 : temps théorique, heures attribuées, taux d'attribution
-        r1c1, r1c2, r1c3 = st.columns(3)
-        r1c1.metric(
-            "Temps travaillé théorique",
-            f"{temps_travaille_theorique_annuel:.0f} h" if pd.notna(temps_travaille_theorique_annuel) else "–",
-            help="Somme, semaine par semaine, du nombre d'opérateurs distincts ayant "
-                 "pointé cette semaine-là × 39 h (calcul identique à celui de l'onglet "
-                 f"« Suivi hebdomadaire »). Sur les {nb_semaines_ytd} semaines de l'année "
-                 f"comportant au moins un pointage, cela représente en moyenne "
-                 f"{moyenne_operateurs_semaine:.1f} opérateur(s) actif(s) par semaine. "
-                 "C'est le volume d'heures que l'effectif aurait dû produire en théorie "
-                 "sur la période (base 39 h/semaine/opérateur).",
-        )
-        r1c2.metric(
-            "Nombre total d'heures attribuées",
-            f"{heures_attribuees_total_annee:.1f} h" if pd.notna(heures_attribuees_total_annee) else "–",
-            help="Somme de tous les pointages opérateurs de l'année (feuille "
-                 "« temps_reel_operateur »), tous dossiers confondus, indépendamment de "
-                 "leur statut (clos ou non). C'est le numérateur du taux d'attribution "
-                 "et la même donnée que le graphique « Nombre d'heures attribuées par "
-                 "semaine » ci-dessus (mais cumulée sur l'année entière).",
-        )
-        r1c3.metric(
-            "Taux d'attribution (année)",
-            f"{taux_attribution_annuel:.0%}" if pd.notna(taux_attribution_annuel) else "–",
-            help="Nombre total d'heures attribuées ÷ Temps travaillé théorique. "
-                 "Répond à : sur le temps que les opérateurs auraient dû travailler, "
-                 "quelle part a effectivement été attribuée (pointée) à un dossier ? "
-                 "Par construction : Temps travaillé théorique × Taux d'attribution "
-                 "(année) = Nombre total d'heures attribuées.",
+        st.caption(
+            "À lire comme une formule : chaque encadré est un indicateur, les signes "
+            "×, = et + montrent comment ils se déduisent les uns des autres."
         )
 
-        # Ligne 2 : dossiers clôturés, devisé, travaillé
-        r2c1, r2c2, r2c3 = st.columns(3)
-        r2c1.metric(
-            "Nombre de dossiers clôturés",
-            f"{nb_dossiers_annee}",
-            help=f"Nombre de dossiers avec le statut « Clos » et une date de clôture en {annee_choisie}.",
-        )
-        r2c2.metric(
-            "Nombre total d'heures devisées",
-            f"{devis_total_annee:.1f} h",
-            help="Somme des heures devisées (temps prévu au devis) sur l'ensemble "
-                 f"des dossiers clôturés en {annee_choisie}.",
-        )
-        r2c3.metric(
-            "Nombre total d'heures travaillées",
-            f"{travaille_total_annee:.1f} h",
-            help="Somme des heures réellement travaillées, telles qu'enregistrées sur "
-                 f"les ordres de fabrication des dossiers clôturés en {annee_choisie}. "
-                 "⚠️ Cette donnée porte uniquement sur les dossiers clôturés cette année : "
-                 "elle diffère donc du « Nombre total d'heures attribuées » ci-dessus, qui "
-                 "porte sur tous les pointages de l'année, y compris ceux liés à des "
-                 "dossiers pas encore clôturés.",
+        def _kpi_box(label: str, value: str, help_text: str) -> None:
+            """Affiche un indicateur dans un encadré, façon 'bloc de formule'."""
+            with st.container(border=True):
+                st.metric(label, value, help=help_text)
+
+        def _operateur(symbole: str) -> None:
+            """Affiche un opérateur (×, =, +) centré et aligné avec les encadrés."""
+            st.markdown(
+                "<div style='text-align:center; font-size:2.1rem; font-weight:600; "
+                f"padding-top:2.6rem;'>{symbole}</div>",
+                unsafe_allow_html=True,
+            )
+
+        # -- Ligne 1 : Temps théorique × Taux d'attribution = Heures attribuées --
+        l1c1, l1o1, l1c2, l1o2, l1c3 = st.columns([3, 0.6, 3, 0.6, 3])
+        with l1c1:
+            _kpi_box(
+                "Temps travaillé théorique",
+                f"{temps_travaille_theorique_annuel:.0f} h" if pd.notna(temps_travaille_theorique_annuel) else "–",
+                help_text="Somme, semaine par semaine, du nombre d'opérateurs distincts ayant "
+                          "pointé cette semaine-là × 39 h (calcul identique à celui de l'onglet "
+                          f"« Suivi hebdomadaire »). Sur les {nb_semaines_ytd} semaines de "
+                          f"l'année comportant au moins un pointage, cela représente en "
+                          f"moyenne {moyenne_operateurs_semaine:.1f} opérateur(s) actif(s) "
+                          "par semaine. C'est le volume d'heures que l'effectif aurait dû "
+                          "produire en théorie sur la période (base 39 h/semaine/opérateur).",
+            )
+        with l1o1:
+            _operateur("×")
+        with l1c2:
+            _kpi_box(
+                "Taux d'attribution (année)",
+                f"{taux_attribution_annuel:.0%}" if pd.notna(taux_attribution_annuel) else "–",
+                help_text="Part du temps théorique qui a effectivement été attribuée "
+                          "(pointée) à un dossier, quel que soit son statut.",
+            )
+        with l1o2:
+            _operateur("=")
+        with l1c3:
+            _kpi_box(
+                "Nombre total d'heures attribuées",
+                f"{heures_attribuees_total_annee:.1f} h" if pd.notna(heures_attribuees_total_annee) else "–",
+                help_text="Somme de tous les pointages opérateurs de l'année (feuille "
+                          "« temps_reel_operateur »), tous dossiers confondus, indépendamment "
+                          "de leur statut (clos ou non).",
+            )
+
+        # -- Ligne 2 : Heures attribuées = Heures livrées + Heures non-livrées --
+        l2c1, l2o1, l2c2, l2o2, l2c3 = st.columns([3, 0.6, 3, 0.6, 3])
+        with l2o1:
+            _operateur("=")
+        with l2c2:
+            _kpi_box(
+                "Nombre total d'heures travaillées et livrées",
+                f"{heures_travaillees_livrees_annee:.1f} h",
+                help_text="Somme des heures réellement travaillées, telles qu'enregistrées "
+                          "sur les ordres de fabrication des dossiers déjà clôturés (livrés) "
+                          f"en {annee_choisie}.",
+            )
+        with l2o2:
+            _operateur("+")
+        with l2c3:
+            _kpi_box(
+                "Nombre total d'heures travaillées et non-livrées",
+                f"{heures_travaillees_non_livrees_annee:.1f} h"
+                if pd.notna(heures_travaillees_non_livrees_annee) else "–",
+                help_text="Nombre total d'heures attribuées − Nombre total d'heures "
+                          "travaillées et livrées. Correspond à la somme des pointages "
+                          "attribués à un dossier dont le statut n'est pas encore « Clos » "
+                          "(travail en cours, pas encore livré).",
+            )
+
+        # -- Écart (balance) entre heures livrées et heures devisées --
+        e1, e2, e3 = st.columns([3.6, 3, 3.6])
+        with e2:
+            ecart_txt = (
+                f"{ecart_relatif_devis_travaille:+.1%}"
+                if pd.notna(ecart_relatif_devis_travaille) else "–"
+            )
+            st.markdown(
+                "<div style='text-align:center; line-height:1.9;'>"
+                "<span style='font-size:1.7rem;'>⚖️</span><br>"
+                "<span style='font-size:1.3rem;'>↕️</span><br>"
+                "Écart relatif travaillé / devisé<br>"
+                f"<span style='font-size:1.4rem; font-weight:600;'>{ecart_txt}</span>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+        st.caption(
+            "ℹ️ Compare le total des heures travaillées et livrées (ci-dessus) au total "
+            "des heures devisées (ci-dessous) : (travaillé et livré − devisé) ÷ devisé. "
+            "Positif = dépassement du devis, négatif = gain de temps."
         )
 
-        # Ligne 3 : écart relatif, moyennes par dossier
-        r3c1, r3c2, r3c3 = st.columns(3)
-        r3c1.metric(
-            "Écart relatif travaillé / devisé",
-            f"{ecart_relatif_devis_travaille:+.1%}" if pd.notna(ecart_relatif_devis_travaille) else "–",
-            help="(Nombre total d'heures travaillées − Nombre total d'heures devisées) "
-                 "÷ Nombre total d'heures devisées, calculé sur l'ensemble des dossiers "
-                 "clôturés dans l'année. Répond à : en général, dépasse-t-on le devis ou "
-                 "le dossier est-il réalisé plus vite que prévu ? "
-                 "(positif = dépassement global du devis, négatif = gain de temps global). "
-                 "Par construction : Nombre total d'heures travaillées ÷ Nombre total "
-                 "d'heures devisées = 1 + Écart relatif.",
-        )
-        r3c2.metric(
-            "Heures devisées moy. / dossier",
-            f"{devis_moyen_dossier:.1f} h",
-            help="Nombre total d'heures devisées ÷ nombre de dossiers clôturés.",
-        )
-        r3c3.metric(
-            "Heures travaillées moy. / dossier",
-            f"{travaille_moyen_dossier:.1f} h",
-            help="Nombre total d'heures travaillées ÷ nombre de dossiers clôturés.",
-        )
+        # -- Ligne 3 : Dossiers clôturés × Heures devisées moy. = Heures devisées --
+        l3c1, l3o1, l3c2, l3o2, l3c3 = st.columns([3, 0.6, 3, 0.6, 3])
+        with l3c1:
+            _kpi_box(
+                "Nombre de dossiers clôturés",
+                f"{nb_dossiers_annee}",
+                help_text=f"Nombre de dossiers avec le statut « Clos » et une date de "
+                          f"clôture en {annee_choisie}.",
+            )
+        with l3o1:
+            _operateur("×")
+        with l3c2:
+            _kpi_box(
+                "Heures devisées moy. / dossier",
+                f"{devis_moyen_dossier:.1f} h",
+                help_text="Nombre total d'heures devisées ÷ nombre de dossiers clôturés.",
+            )
+        with l3o2:
+            _operateur("=")
+        with l3c3:
+            _kpi_box(
+                "Nombre total d'heures devisées",
+                f"{devis_total_annee:.1f} h",
+                help_text="Somme des heures devisées (temps prévu au devis) sur l'ensemble "
+                          f"des dossiers clôturés en {annee_choisie}.",
+            )
 
         # -------------------------------------------------------------------
         # Temps par poste
