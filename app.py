@@ -1345,9 +1345,17 @@ with tab_annuel:
                 unsafe_allow_html=True,
             )
 
+        # Grille commune à toutes les lignes : 4 colonnes de contenu (ColA, ColB,
+        # ColC, ColD) séparées par des opérateurs. La ColC est la colonne pivot :
+        # elle contient "Nombre total d'heures attribuées" (ligne 1), "Nombre total
+        # d'heures travaillées et livrées" (ligne 2) et "Nombre total d'heures
+        # devisées" (ligne 3), alignés à la verticale pour que ces indicateurs à
+        # comparer entre eux tombent dans la même colonne.
+        GRID = [3, 0.6, 3, 0.6, 3, 0.6, 3]
+
         # -- Ligne 1 : Temps théorique × Taux d'attribution = Heures attribuées --
-        l1c1, l1o1, l1c2, l1o2, l1c3 = st.columns([3, 0.6, 3, 0.6, 3])
-        with l1c1:
+        l1a, l1op1, l1b, l1op2, l1c, l1op3, l1d = st.columns(GRID)
+        with l1a:
             _kpi_box(
                 "Temps travaillé théorique",
                 f"{temps_travaille_theorique_annuel:.0f} h" if pd.notna(temps_travaille_theorique_annuel) else "–",
@@ -1359,18 +1367,18 @@ with tab_annuel:
                           "par semaine. C'est le volume d'heures que l'effectif aurait dû "
                           "produire en théorie sur la période (base 39 h/semaine/opérateur).",
             )
-        with l1o1:
+        with l1op1:
             _operateur("×")
-        with l1c2:
+        with l1b:
             _kpi_box(
                 "Taux d'attribution (année)",
                 f"{taux_attribution_annuel:.0%}" if pd.notna(taux_attribution_annuel) else "–",
                 help_text="Part du temps théorique qui a effectivement été attribuée "
                           "(pointée) à un dossier, quel que soit son statut.",
             )
-        with l1o2:
+        with l1op2:
             _operateur("=")
-        with l1c3:
+        with l1c:
             _kpi_box(
                 "Nombre total d'heures attribuées",
                 f"{heures_attribuees_total_annee:.1f} h" if pd.notna(heures_attribuees_total_annee) else "–",
@@ -1378,12 +1386,15 @@ with tab_annuel:
                           "« temps_reel_operateur »), tous dossiers confondus, indépendamment "
                           "de leur statut (clos ou non).",
             )
+        # l1op3 et l1d restent vides sur cette ligne
 
         # -- Ligne 2 : Heures attribuées = Heures livrées + Heures non-livrées --
-        l2c1, l2o1, l2c2, l2o2, l2c3 = st.columns([3, 0.6, 3, 0.6, 3])
-        with l2o1:
+        l2a, l2op1, l2b, l2op2, l2c, l2op3, l2d = st.columns(GRID)
+        # l2a, l2op1 et l2b restent vides : le résultat de la ligne 1 (colonne C)
+        # devient l'opérande de gauche de cette ligne.
+        with l2op2:
             _operateur("=")
-        with l2c2:
+        with l2c:
             _kpi_box(
                 "Nombre total d'heures travaillées et livrées",
                 f"{heures_travaillees_livrees_annee:.1f} h",
@@ -1391,9 +1402,9 @@ with tab_annuel:
                           "sur les ordres de fabrication des dossiers déjà clôturés (livrés) "
                           f"en {annee_choisie}.",
             )
-        with l2o2:
+        with l2op3:
             _operateur("+")
-        with l2c3:
+        with l2d:
             _kpi_box(
                 "Nombre total d'heures travaillées et non-livrées",
                 f"{heures_travaillees_non_livrees_annee:.1f} h"
@@ -1405,8 +1416,10 @@ with tab_annuel:
             )
 
         # -- Écart (balance) entre heures livrées et heures devisées --
-        e1, e2, e3 = st.columns([3.6, 3, 3.6])
-        with e2:
+        # Positionné dans la même colonne (ColC) que "livrées" au-dessus et
+        # "devisées" en dessous, pour bien montrer les deux indicateurs comparés.
+        e_a, e_op1, e_b, e_op2, e_c, e_op3, e_d = st.columns(GRID)
+        with e_c:
             ecart_txt = (
                 f"{ecart_relatif_devis_travaille:+.1%}"
                 if pd.notna(ecart_relatif_devis_travaille) else "–"
@@ -1427,25 +1440,25 @@ with tab_annuel:
         )
 
         # -- Ligne 3 : Dossiers clôturés × Heures devisées moy. = Heures devisées --
-        l3c1, l3o1, l3c2, l3o2, l3c3 = st.columns([3, 0.6, 3, 0.6, 3])
-        with l3c1:
+        l3a, l3op1, l3b, l3op2, l3c, l3op3, l3d = st.columns(GRID)
+        with l3a:
             _kpi_box(
                 "Nombre de dossiers clôturés",
                 f"{nb_dossiers_annee}",
                 help_text=f"Nombre de dossiers avec le statut « Clos » et une date de "
                           f"clôture en {annee_choisie}.",
             )
-        with l3o1:
+        with l3op1:
             _operateur("×")
-        with l3c2:
+        with l3b:
             _kpi_box(
                 "Heures devisées moy. / dossier",
                 f"{devis_moyen_dossier:.1f} h",
                 help_text="Nombre total d'heures devisées ÷ nombre de dossiers clôturés.",
             )
-        with l3o2:
+        with l3op2:
             _operateur("=")
-        with l3c3:
+        with l3c:
             _kpi_box(
                 "Nombre total d'heures devisées",
                 f"{devis_total_annee:.1f} h",
