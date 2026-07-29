@@ -1104,10 +1104,9 @@ with tab_annuel:
     ].copy()
 
     # -----------------------------------------------------------------------
-    # Graphiques hebdomadaires : heures attribuées & taux d'attribution
+    # Calculs hebdomadaires (utilisés à la fois par "Indicateurs généraux"
+    # ci-dessous et par le graphique "Évolution hebdomadaire" plus bas)
     # -----------------------------------------------------------------------
-    st.subheader("🗓️ Évolution hebdomadaire")
-
     if not pointages_annee.empty:
         weekly = (
             pointages_annee.groupby("iso_week")
@@ -1137,7 +1136,7 @@ with tab_annuel:
 
         # Nombre total d'heures attribuées = somme de tous les pointages de l'année
         # (indépendamment du statut des dossiers), déjà utilisée pour le graphique
-        # "Nombre d'heures attribuées par semaine" ci-dessous.
+        # "Nombre d'heures attribuées par semaine" plus bas.
         heures_attribuees_total_annee = weekly["heures_attribuees"].sum()
 
         # Taux d'attribution (année) = heures attribuées (pointées) / temps théorique,
@@ -1149,143 +1148,19 @@ with tab_annuel:
             if temps_travaille_theorique_annuel > 0
             else float("nan")
         )
-
-        col_a1, col_a2 = st.columns(2)
-
-        with col_a1:
-            st.markdown("**Nombre d'heures attribuées par semaine**")
-            fig_heures_semaine = px.bar(
-                weekly,
-                x="semaine",
-                y="heures_attribuees",
-                labels={"semaine": "", "heures_attribuees": "Heures attribuées"},
-            )
-            fig_heures_semaine.add_hline(
-                y=moyenne_heures_semaine,
-                line_dash="dash",
-                line_color="firebrick",
-                annotation_text=f"Moyenne : {moyenne_heures_semaine:.1f} h",
-                annotation_position="top left",
-            )
-            st.plotly_chart(fig_heures_semaine, use_container_width=True, key="bar_heures_par_semaine_annuel")
-
-        with col_a2:
-            st.markdown("**Taux d'attribution par semaine**")
-            st.caption("Heures attribuées / temps théorique de travail opérateur (nb opérateurs × 39 h)")
-            fig_taux_semaine = px.line(
-                weekly,
-                x="semaine",
-                y="taux_attribution",
-                markers=True,
-                labels={"semaine": "", "taux_attribution": "Taux d'attribution"},
-            )
-            fig_taux_semaine.update_yaxes(tickformat=".0%")
-            fig_taux_semaine.add_hline(
-                y=moyenne_taux_semaine,
-                line_dash="dash",
-                line_color="firebrick",
-                annotation_text=f"Moyenne : {moyenne_taux_semaine:.0%}",
-                annotation_position="top left",
-            )
-            st.plotly_chart(fig_taux_semaine, use_container_width=True, key="line_taux_par_semaine_annuel")
-            st.caption(
-                f"ℹ️ La ligne « Moyenne » ({moyenne_taux_semaine:.0%}) est la moyenne simple "
-                f"des taux hebdomadaires (chaque semaine compte pour 1, peu importe son volume "
-                f"d'heures). Le « Taux d'attribution (année) » affiché plus bas "
-                f"({taux_attribution_annuel:.0%}) est légèrement différent : c'est le total des "
-                "heures attribuées sur l'année divisé par le total du temps théorique — chaque "
-                "semaine y pèse en fonction de son volume réel d'heures, pas de façon égale. "
-                "Les deux sont corrects, ils répondent juste à une pondération différente."
-            )
     else:
-        st.info("Aucun pointage sur l'année sélectionnée.")
+        weekly = pd.DataFrame()
         temps_travaille_theorique_annuel = float("nan")
         heures_attribuees_total_annee = float("nan")
         taux_attribution_annuel = float("nan")
+        moyenne_heures_semaine = float("nan")
         moyenne_taux_semaine = float("nan")
         nb_semaines_ytd = 0
         moyenne_operateurs_semaine = float("nan")
 
     # -----------------------------------------------------------------------
-    # Graphiques mensuels : heures attribuées & taux d'attribution
-    # -----------------------------------------------------------------------
-    st.subheader("🗓️ Évolution mensuelle")
-
-    if not pointages_annee.empty:
-        monthly = (
-            pointages_annee.groupby("cal_month")
-            .agg(
-                heures_attribuees=("Durée h", "sum"),
-                nb_operateurs=("id_operateur", "nunique"),
-            )
-            .reset_index()
-            .sort_values("cal_month")
-        )
-        monthly["jours_ouvres"] = monthly["cal_month"].apply(
-            lambda m: nb_jours_ouvres(*month_bounds(annee_choisie, int(m)))
-        )
-        monthly["temps_theorique"] = monthly["jours_ouvres"] * monthly["nb_operateurs"] * 7.8
-        monthly["taux_attribution"] = (
-            monthly["heures_attribuees"] / monthly["temps_theorique"].replace(0, float("nan"))
-        )
-        monthly["mois"] = monthly["cal_month"].apply(lambda m: NOMS_MOIS[int(m) - 1])
-
-        moyenne_heures_mois = monthly["heures_attribuees"].mean()
-        moyenne_taux_mois = monthly["taux_attribution"].mean()
-
-        col_am1, col_am2 = st.columns(2)
-
-        with col_am1:
-            st.markdown("**Nombre d'heures attribuées par mois**")
-            fig_heures_mois = px.bar(
-                monthly,
-                x="mois",
-                y="heures_attribuees",
-                labels={"mois": "", "heures_attribuees": "Heures attribuées"},
-            )
-            fig_heures_mois.add_hline(
-                y=moyenne_heures_mois,
-                line_dash="dash",
-                line_color="firebrick",
-                annotation_text=f"Moyenne : {moyenne_heures_mois:.1f} h",
-                annotation_position="top left",
-            )
-            st.plotly_chart(fig_heures_mois, use_container_width=True, key="bar_heures_par_mois_annuel")
-
-        with col_am2:
-            st.markdown("**Taux d'attribution par mois**")
-            st.caption(
-                "Heures attribuées / temps théorique de travail opérateur "
-                "(jours ouvrés du mois × nb opérateurs × 7,8 h)"
-            )
-            fig_taux_mois = px.line(
-                monthly,
-                x="mois",
-                y="taux_attribution",
-                markers=True,
-                labels={"mois": "", "taux_attribution": "Taux d'attribution"},
-            )
-            fig_taux_mois.update_yaxes(tickformat=".0%")
-            fig_taux_mois.add_hline(
-                y=moyenne_taux_mois,
-                line_dash="dash",
-                line_color="firebrick",
-                annotation_text=f"Moyenne : {moyenne_taux_mois:.0%}",
-                annotation_position="top left",
-            )
-            st.plotly_chart(fig_taux_mois, use_container_width=True, key="line_taux_par_mois_annuel")
-            st.caption(
-                f"ℹ️ La ligne « Moyenne » ({moyenne_taux_mois:.0%}) est la moyenne simple "
-                "des taux mensuels (chaque mois compte pour 1, peu importe son volume "
-                "d'heures)."
-            )
-    else:
-        st.info("Aucun pointage sur l'année sélectionnée.")
-
-    # -----------------------------------------------------------------------
     # Indicateurs généraux de l'année
     # -----------------------------------------------------------------------
-    st.divider()
     st.subheader(f"📈 Indicateurs généraux — {annee_choisie}")
 
     if not of_annee.empty:
@@ -1519,3 +1394,136 @@ with tab_annuel:
         st.plotly_chart(fig_operation_annee, use_container_width=True, key="bar_temps_par_operation_annuel")
     else:
         st.info("Aucun dossier clôturé sur l'année sélectionnée.")
+
+    # -----------------------------------------------------------------------
+    # Graphiques hebdomadaires : heures attribuées & taux d'attribution
+    # -----------------------------------------------------------------------
+    st.divider()
+    st.subheader("🗓️ Évolution hebdomadaire")
+
+    if not pointages_annee.empty:
+        col_a1, col_a2 = st.columns(2)
+
+        with col_a1:
+            st.markdown("**Nombre d'heures attribuées par semaine**")
+            fig_heures_semaine = px.bar(
+                weekly,
+                x="semaine",
+                y="heures_attribuees",
+                labels={"semaine": "", "heures_attribuees": "Heures attribuées"},
+            )
+            fig_heures_semaine.add_hline(
+                y=moyenne_heures_semaine,
+                line_dash="dash",
+                line_color="firebrick",
+                annotation_text=f"Moyenne : {moyenne_heures_semaine:.1f} h",
+                annotation_position="top left",
+            )
+            st.plotly_chart(fig_heures_semaine, use_container_width=True, key="bar_heures_par_semaine_annuel")
+
+        with col_a2:
+            st.markdown("**Taux d'attribution par semaine**")
+            st.caption("Heures attribuées / temps théorique de travail opérateur (nb opérateurs × 39 h)")
+            fig_taux_semaine = px.line(
+                weekly,
+                x="semaine",
+                y="taux_attribution",
+                markers=True,
+                labels={"semaine": "", "taux_attribution": "Taux d'attribution"},
+            )
+            fig_taux_semaine.update_yaxes(tickformat=".0%")
+            fig_taux_semaine.add_hline(
+                y=moyenne_taux_semaine,
+                line_dash="dash",
+                line_color="firebrick",
+                annotation_text=f"Moyenne : {moyenne_taux_semaine:.0%}",
+                annotation_position="top left",
+            )
+            st.plotly_chart(fig_taux_semaine, use_container_width=True, key="line_taux_par_semaine_annuel")
+            st.caption(
+                f"ℹ️ La ligne « Moyenne » ({moyenne_taux_semaine:.0%}) est la moyenne simple "
+                f"des taux hebdomadaires (chaque semaine compte pour 1, peu importe son volume "
+                f"d'heures). Le « Taux d'attribution (année) » affiché plus haut "
+                f"({taux_attribution_annuel:.0%}) est légèrement différent : c'est le total des "
+                "heures attribuées sur l'année divisé par le total du temps théorique — chaque "
+                "semaine y pèse en fonction de son volume réel d'heures, pas de façon égale. "
+                "Les deux sont corrects, ils répondent juste à une pondération différente."
+            )
+    else:
+        st.info("Aucun pointage sur l'année sélectionnée.")
+
+    # -----------------------------------------------------------------------
+    # Graphiques mensuels : heures attribuées & taux d'attribution
+    # -----------------------------------------------------------------------
+    st.subheader("🗓️ Évolution mensuelle")
+
+    if not pointages_annee.empty:
+        monthly = (
+            pointages_annee.groupby("cal_month")
+            .agg(
+                heures_attribuees=("Durée h", "sum"),
+                nb_operateurs=("id_operateur", "nunique"),
+            )
+            .reset_index()
+            .sort_values("cal_month")
+        )
+        monthly["jours_ouvres"] = monthly["cal_month"].apply(
+            lambda m: nb_jours_ouvres(*month_bounds(annee_choisie, int(m)))
+        )
+        monthly["temps_theorique"] = monthly["jours_ouvres"] * monthly["nb_operateurs"] * 7.8
+        monthly["taux_attribution"] = (
+            monthly["heures_attribuees"] / monthly["temps_theorique"].replace(0, float("nan"))
+        )
+        monthly["mois"] = monthly["cal_month"].apply(lambda m: NOMS_MOIS[int(m) - 1])
+
+        moyenne_heures_mois = monthly["heures_attribuees"].mean()
+        moyenne_taux_mois = monthly["taux_attribution"].mean()
+
+        col_am1, col_am2 = st.columns(2)
+
+        with col_am1:
+            st.markdown("**Nombre d'heures attribuées par mois**")
+            fig_heures_mois = px.bar(
+                monthly,
+                x="mois",
+                y="heures_attribuees",
+                labels={"mois": "", "heures_attribuees": "Heures attribuées"},
+            )
+            fig_heures_mois.add_hline(
+                y=moyenne_heures_mois,
+                line_dash="dash",
+                line_color="firebrick",
+                annotation_text=f"Moyenne : {moyenne_heures_mois:.1f} h",
+                annotation_position="top left",
+            )
+            st.plotly_chart(fig_heures_mois, use_container_width=True, key="bar_heures_par_mois_annuel")
+
+        with col_am2:
+            st.markdown("**Taux d'attribution par mois**")
+            st.caption(
+                "Heures attribuées / temps théorique de travail opérateur "
+                "(jours ouvrés du mois × nb opérateurs × 7,8 h)"
+            )
+            fig_taux_mois = px.line(
+                monthly,
+                x="mois",
+                y="taux_attribution",
+                markers=True,
+                labels={"mois": "", "taux_attribution": "Taux d'attribution"},
+            )
+            fig_taux_mois.update_yaxes(tickformat=".0%")
+            fig_taux_mois.add_hline(
+                y=moyenne_taux_mois,
+                line_dash="dash",
+                line_color="firebrick",
+                annotation_text=f"Moyenne : {moyenne_taux_mois:.0%}",
+                annotation_position="top left",
+            )
+            st.plotly_chart(fig_taux_mois, use_container_width=True, key="line_taux_par_mois_annuel")
+            st.caption(
+                f"ℹ️ La ligne « Moyenne » ({moyenne_taux_mois:.0%}) est la moyenne simple "
+                "des taux mensuels (chaque mois compte pour 1, peu importe son volume "
+                "d'heures)."
+            )
+    else:
+        st.info("Aucun pointage sur l'année sélectionnée.")
