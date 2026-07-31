@@ -128,52 +128,80 @@ def nb_jours_ouvres(premier_jour: date, dernier_jour: date) -> int:
     return int(np.busday_count(premier_jour, dernier_jour + timedelta(days=1)))
 
 
-TAUX_HORAIRE_JOUR = 7.8  # heures théoriques par opérateur et par jour travaillé
+TAUX_HORAIRE_JOUR = 7.8  # heures théoriques par opérateur et par jour ouvré travaillé
 
 
-def temps_theorique_jour_par_jour(df_pointages_periode: pd.DataFrame, taux_horaire: float = TAUX_HORAIRE_JOUR) -> float:
-    """Calcule le temps travaillé théorique d'une période en sommant, jour par jour,
-    (nombre d'opérateurs distincts ayant pointé ce jour-là) x `taux_horaire`.
+def temps_theorique_semaine(pointages_semaine: pd.DataFrame, monday: date, sunday: date,
+                             taux_horaire: float = TAUX_HORAIRE_JOUR) -> float:
+    """Temps travaillé théorique d'une semaine ISO complète.
 
-    Pourquoi ce calcul plutôt que "nb opérateurs distincts sur la période x nb jours
-    ouvrés de la période x taux_horaire" :
-    ----------------------------------------------------------------------------------
-    Le nombre d'opérateurs distincts ayant pointé sur une période (semaine, mois...)
-    ne représente pas un effectif présent chaque jour ouvré de cette période, mais le
-    nombre total d'opérateurs différents étant intervenus au moins une fois sur la
-    période. Multiplier ce nombre par la totalité des jours ouvrés de la période
-    suppose à tort que chaque opérateur a travaillé tous ces jours : si un opérateur
-    n'a travaillé qu'une semaine sur les quatre du mois, son temps théorique est
-    surévalué des trois semaines où il n'a pas pointé. Le temps théorique global est
-    donc surestimé, et le taux d'attribution (heures attribuées / temps théorique)
-    est de fait sous-estimé.
+    = (nb d'opérateurs distincts ayant pointé au moins une fois durant la semaine)
+      x (jours ouvrés de la semaine) x taux_horaire.
 
-    En calculant un temps théorique jour par jour (nb d'opérateurs distincts ce
-    jour-là x taux_horaire), puis en sommant sur tous les jours de la période, on
-    évite ce biais : un opérateur n'est comptabilisé que pour les jours où il a
-    effectivement pointé. Cette approche fonctionne aussi bien pour une semaine que
-    pour un mois, et elle est insensible au fait qu'une semaine soit à cheval sur
-    deux mois, puisque chaque jour n'est compté que dans la période à laquelle il
-    appartient.
+    Choix retenu après plusieurs itérations : le pointage jour par jour s'est révélé
+    trop peu fiable (oublis de pointage isolés, sur-pointage compensatoire le
+    lendemain) pour servir de base à un calcul journalier — cf. échanges précédents.
+    À l'échelle de la semaine en revanche, un opérateur qui a travaillé pointe
+    presque toujours au moins une fois ; on suppose donc que tout opérateur ayant
+    pointé au moins une fois durant la semaine a été présent tous les jours ouvrés
+    de cette semaine.
 
-    Limite : si un opérateur travaille un jour donné mais oublie de pointer, ce
-    jour-là ne sera pas compté pour lui, ce qui peut légèrement sous-estimer le
-    temps théorique dans ce cas précis (biais inverse, mais généralement plus rare
-    et de moindre ampleur que le biais corrigé ci-dessus).
+    Limite assumée : surestime le temps théorique des opérateurs réellement à temps
+    partiel ou n'ayant travaillé qu'une partie de la semaine (congé, arrêt, entrée/
+    sortie en cours de semaine).
     """
-    if df_pointages_periode.empty:
-        return 0.0
-    jour = df_pointages_periode["heure_debut"].dt.date
-    nb_operateurs_par_jour = df_pointages_periode.groupby(jour)["id_operateur"].nunique()
-    return float((nb_operateurs_par_jour * taux_horaire).sum())
+    nb_operateurs = pointages_semaine["id_operateur"].nunique()
+    jours_ouvres_semaine = nb_jours_ouvres(monday, sunday)
+    return nb_operateurs * jours_ouvres_semaine * taux_horaire
 
 
-def temps_theorique_par_groupe(df_pointages: pd.DataFrame, group_col: str, taux_horaire: float = TAUX_HORAIRE_JOUR) -> pd.Series:
-    """Applique `temps_theorique_jour_par_jour` à chaque sous-groupe (ex. par semaine ISO
-    ou par mois calendaire) et retourne une Series indexée par `group_col`."""
-    return df_pointages.groupby(group_col, group_keys=False).apply(
-        lambda g: temps_theorique_jour_par_jour(g, taux_horaire)
-    )
+def temps_theorique_mois_via_semaines(df_pointages: pd.DataFrame, premier_jour: date, dernier_jour: date,
+                                       taux_horaire: float = TAUX_HORAIRE_JOUR) -> float:
+    """Temps travaillé théorique d'un mois calendaire, calculé en sommant les semaines.
+
+    Pour chaque semaine ISO chevauchant le mois : le nombre d'opérateurs distincts est
+    calculé sur la semaine ISO COMPLÈTE (y compris les jours qui débordent sur le mois
+    voisin), afin de ne pas sous-compter un opérateur présent toute la semaine mais
+    dont les pointages tombent en partie sur l'autre mois. En revanche, seuls les
+    jours ouvrés de cette semaine qui appartiennent réellement au mois sélectionné
+    sont comptés dans le volume d'heures — c'est ce qui règle le problème des
+    semaines à cheval sur deux mois : chaque jour ouvré n'est valorisé que dans le
+    mois auquel il appartient, avec l'effectif de sa semaine complète.
+    """
+    total = 0.0
+    lundi = premier_jour - timedelta(days=premier_jour.weekday())
+    while lundi <= dernier_jour:
+        dimanche = lundi + timedelta(days=6)
+        iso_year, iso_week, _ = lundi.isocalendar()
+        mask_semaine = (df_pointages["iso_year"] == iso_year) & (df_pointages["iso_week"] == iso_week)
+        nb_operateurs_semaine = df_pointages.loc[mask_semaine, "id_operateur"].nunique()
+
+        debut_intersection = max(lundi, premier_jour)
+        fin_intersection = min(dimanche, dernier_jour)
+        jours_ouvres_dans_mois = (
+            nb_jours_ouvres(debut_intersection, fin_intersection) if debut_intersection <= fin_intersection else 0
+        )
+
+        total += nb_operateurs_semaine * jours_ouvres_dans_mois * taux_horaire
+        lundi += timedelta(days=7)
+
+    return total
+
+
+def temps_theorique_par_groupe_semaine(df_pointages: pd.DataFrame, group_col: str,
+                                        taux_horaire: float = TAUX_HORAIRE_JOUR) -> pd.Series:
+    """Calcule le temps théorique semaine par semaine (nb opérateurs distincts de la
+    semaine ISO x jours ouvrés de la semaine x taux_horaire), puis regroupe le résultat
+    par `group_col` (ex. iso_week directement, ou cal_month pour un total mensuel basé
+    sur des semaines ISO complètes non ajustées aux frontières du mois)."""
+    semaines = df_pointages[["iso_year", "iso_week", group_col]].drop_duplicates(subset=["iso_year", "iso_week"])
+    valeurs = []
+    for _, row in semaines.iterrows():
+        monday, sunday = week_bounds(row["iso_year"], row["iso_week"])
+        mask = (df_pointages["iso_year"] == row["iso_year"]) & (df_pointages["iso_week"] == row["iso_week"])
+        valeurs.append(temps_theorique_semaine(df_pointages.loc[mask], monday, sunday, taux_horaire))
+    semaines = semaines.assign(temps_theorique=valeurs)
+    return semaines.groupby(group_col)["temps_theorique"].sum()
 
 
 def build_month_options(df_pointages: pd.DataFrame, df_of: pd.DataFrame) -> pd.DataFrame:
@@ -306,7 +334,8 @@ with tab_hebdo:
 
     heures_attribuees = pointages_semaine["Durée h"].sum()
     nb_operateurs = pointages_semaine["id_operateur"].nunique()
-    temps_theorique = temps_theorique_jour_par_jour(pointages_semaine)
+    jours_ouvres_semaine_sel = nb_jours_ouvres(monday, sunday)
+    temps_theorique = temps_theorique_semaine(pointages_semaine, monday, sunday)
     taux_attribution = (heures_attribuees / temps_theorique) if temps_theorique > 0 else 0
 
     st.subheader("👷 Activité des opérateurs")
@@ -316,12 +345,16 @@ with tab_hebdo:
     c3.metric(
         "Temps travaillé théorique",
         f"{temps_theorique:.0f} h",
-        help="Somme, jour par jour, du nombre d'opérateurs distincts ayant pointé ce jour × 7,8 h",
+        help=(
+            f"{nb_operateurs} opérateur(s) ayant pointé au moins une fois cette semaine × "
+            f"{jours_ouvres_semaine_sel} jours ouvrés × 7,8 h. On suppose qu'un opérateur "
+            "ayant pointé au moins une fois dans la semaine y a travaillé toute la semaine."
+        ),
     )
     c4.metric(
         "Taux d'attribution",
         f"{taux_attribution:.0%}",
-        help="Heures attribuées / temps théorique (somme jour par jour du nb d'opérateurs × 7,8 h)",
+        help="Heures attribuées / temps théorique (nb opérateurs de la semaine × jours ouvrés × 7,8 h)",
     )
 
     col_pie1, col_pie2 = st.columns(2)
@@ -743,7 +776,7 @@ with tab_mensuel:
     heures_attribuees_m = pointages_mois["Durée h"].sum()
     nb_operateurs_m = pointages_mois["id_operateur"].nunique()
     jours_ouvres_m = nb_jours_ouvres(premier_jour, dernier_jour)
-    temps_theorique_m = temps_theorique_jour_par_jour(pointages_mois)
+    temps_theorique_m = temps_theorique_mois_via_semaines(df_pointages, premier_jour, dernier_jour)
     taux_attribution_m = (heures_attribuees_m / temps_theorique_m) if temps_theorique_m > 0 else 0
 
     st.subheader("👷 Activité des opérateurs")
@@ -754,16 +787,18 @@ with tab_mensuel:
         "Temps travaillé théorique",
         f"{temps_theorique_m:.0f} h",
         help=(
-            "Somme, jour par jour, du nombre d'opérateurs distincts ayant pointé ce "
-            "jour × 7,8 h (et non nb d'opérateurs du mois × jours ouvrés × 7,8 h, qui "
-            "suppose à tort que chaque opérateur a travaillé tous les jours ouvrés du "
-            f"mois). À titre indicatif, le mois compte {jours_ouvres_m} jours ouvrés."
+            "Somme, semaine par semaine, du temps théorique de chaque semaine ISO "
+            "chevauchant le mois (nb d'opérateurs distincts de la semaine complète × "
+            "jours ouvrés de cette semaine tombant dans le mois × 7,8 h). Pour les "
+            "semaines à cheval sur deux mois, l'effectif est calculé sur la semaine "
+            "entière mais seuls les jours ouvrés du mois sélectionné sont valorisés — "
+            f"le mois compte au total {jours_ouvres_m} jours ouvrés."
         ),
     )
     cm4.metric(
         "Taux d'attribution",
         f"{taux_attribution_m:.0%}",
-        help="Heures attribuées / temps théorique (somme jour par jour du nb d'opérateurs × 7,8 h)",
+        help="Heures attribuées / temps théorique (somme, semaine par semaine, du nb d'opérateurs × jours ouvrés × 7,8 h)",
     )
 
     col_pie1_m, col_pie2_m = st.columns(2)
@@ -1179,7 +1214,7 @@ with tab_annuel:
             .sort_values("iso_week")
         )
         weekly["temps_theorique"] = weekly["iso_week"].map(
-            temps_theorique_par_groupe(pointages_annee, "iso_week")
+            temps_theorique_par_groupe_semaine(pointages_annee, "iso_week")
         )
         weekly["taux_attribution"] = (
             weekly["heures_attribuees"] / weekly["temps_theorique"].replace(0, float("nan"))
@@ -1190,10 +1225,10 @@ with tab_annuel:
         moyenne_taux_semaine = weekly["taux_attribution"].mean()
 
         # Temps travaillé théorique = somme, semaine par semaine, du temps théorique
-        # calculé exactement comme dans l'onglet "Suivi hebdomadaire" (lui-même
-        # calculé jour par jour : nb d'opérateurs distincts ayant pointé ce jour-là
-        # x 7,8h, sommé sur les jours de la semaine), additionné sur toutes les
-        # semaines de l'année où au moins un pointage existe.
+        # calculé exactement comme dans l'onglet "Suivi hebdomadaire" (nb d'opérateurs
+        # distincts ayant pointé au moins une fois durant la semaine x jours ouvrés de
+        # la semaine x 7,8h), additionné sur toutes les semaines de l'année où au
+        # moins un pointage existe.
         nb_semaines_ytd = len(weekly)
         moyenne_operateurs_semaine = weekly["nb_operateurs"].mean()
         temps_travaille_theorique_annuel = weekly["temps_theorique"].sum()
@@ -1299,15 +1334,15 @@ with tab_annuel:
                 "Temps travaillé théorique",
                 f"{temps_travaille_theorique_annuel:.0f} h" if pd.notna(temps_travaille_theorique_annuel) else "–",
                 help_text="Somme, semaine par semaine, du temps théorique de chaque semaine "
-                          "(lui-même calculé jour par jour : nb d'opérateurs distincts ayant "
-                          "pointé ce jour-là × 7,8 h, sommé sur les jours de la semaine — "
-                          "calcul identique à celui de l'onglet « Suivi hebdomadaire »). Sur "
+                          "(nb d'opérateurs distincts ayant pointé au moins une fois durant la "
+                          "semaine × jours ouvrés de la semaine × 7,8 h — calcul identique à "
+                          "celui de l'onglet « Suivi hebdomadaire »). Sur "
                           f"les {nb_semaines_ytd} semaines de l'année comportant au moins un "
                           f"pointage, cela représente en moyenne {moyenne_operateurs_semaine:.1f} "
                           "opérateur(s) actif(s) par semaine. C'est le volume d'heures que "
-                          "l'effectif aurait dû produire en théorie sur la période, sans "
-                          "supposer qu'un opérateur ayant pointé au moins une fois a "
-                          "travaillé toute la période.",
+                          "l'effectif aurait dû produire en théorie sur la période, en supposant "
+                          "qu'un opérateur ayant pointé au moins une fois dans une semaine y a "
+                          "travaillé toute la semaine.",
             )
         with l1op1:
             _operateur("×")
@@ -1492,7 +1527,7 @@ with tab_annuel:
             st.markdown("**Taux d'attribution par semaine**")
             st.caption(
                 "Heures attribuées / temps théorique de travail opérateur "
-                "(somme jour par jour du nb d'opérateurs distincts × 7,8 h)"
+                "(nb d'opérateurs distincts de la semaine × jours ouvrés × 7,8 h)"
             )
             fig_taux_semaine = px.line(
                 weekly,
@@ -1540,8 +1575,8 @@ with tab_annuel:
         monthly["jours_ouvres"] = monthly["cal_month"].apply(
             lambda m: nb_jours_ouvres(*month_bounds(annee_choisie, int(m)))
         )
-        monthly["temps_theorique"] = monthly["cal_month"].map(
-            temps_theorique_par_groupe(pointages_annee, "cal_month")
+        monthly["temps_theorique"] = monthly["cal_month"].apply(
+            lambda m: temps_theorique_mois_via_semaines(df_pointages, *month_bounds(annee_choisie, int(m)))
         )
         monthly["taux_attribution"] = (
             monthly["heures_attribuees"] / monthly["temps_theorique"].replace(0, float("nan"))
@@ -1574,7 +1609,7 @@ with tab_annuel:
             st.markdown("**Taux d'attribution par mois**")
             st.caption(
                 "Heures attribuées / temps théorique de travail opérateur "
-                "(somme jour par jour du nb d'opérateurs distincts × 7,8 h)"
+                "(somme, semaine par semaine, du nb d'opérateurs × jours ouvrés × 7,8 h)"
             )
             fig_taux_mois = px.line(
                 monthly,
