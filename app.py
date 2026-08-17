@@ -194,8 +194,9 @@ def temps_theorique_par_groupe_semaine(df_pointages: pd.DataFrame, group_col: st
     semaine ISO x jours ouvrés de la semaine x taux_horaire), puis regroupe le résultat
     par `group_col` (ex. iso_week directement, ou cal_month pour un total mensuel basé
     sur des semaines ISO complètes non ajustées aux frontières du mois)."""
+    cols = list(dict.fromkeys(["iso_year", "iso_week", group_col]))  # évite les doublons de colonnes
     semaines = (
-        df_pointages[["iso_year", "iso_week", group_col]]
+        df_pointages[cols]
         .dropna(subset=["iso_year", "iso_week"])
         .drop_duplicates(subset=["iso_year", "iso_week"])
     )
