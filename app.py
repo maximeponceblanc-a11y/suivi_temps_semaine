@@ -4,18 +4,23 @@ Suivi d'activité hebdomadaire — Dashboard Streamlit
 
 Lancer avec :  streamlit run app.py
 
-Le fichier Excel source doit contenir au minimum les feuilles :
+Les données sont lues directement dans Supabase, tables :
   - temps_reel_operateur  (pointages des opérateurs)
   - ordres_fabrication    (ordres de fabrication / dossiers)
+
+Identifiants à renseigner dans .streamlit/secrets.toml (en local) ou dans
+Settings > Secrets (Streamlit Community Cloud) :
+  SUPABASE_URL = "https://xxxx.supabase.co"
+  SUPABASE_KEY = "..."
 """
 
-import io
 from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from supabase import create_client
 
 st.set_page_config(
     page_title="Suivi d'activité hebdomadaire",
@@ -24,7 +29,11 @@ st.set_page_config(
 )
 
 MS_PER_HOUR = 3_600_000  # les durées "temps_devis" / "temps_operateurs" / "duree"
-                         # sont stockées en millisecondes dans le fichier source
+                         # sont stockées en millisecondes dans la base source
+TABLE_POINTAGES = "temps_reel_operateur"
+TABLE_OF = "ordres_fabrication"
+FUSEAU_HORAIRE = "Europe/Paris"
+DUREE_CACHE_S = 600  # les données sont relues dans Supabase au plus toutes les 10 min
 
 # ---------------------------------------------------------------------------
 # Palette de couleurs commune à tous les graphiques "devisé vs réalisé"
@@ -40,17 +49,64 @@ COLOR_MAP_DEVIS_REALISE = {
 # Chargement des données
 # ---------------------------------------------------------------------------
 
-@st.cache_data(show_spinner="Lecture du fichier Excel…")
-def load_data(file_bytes: bytes):
-    """Charge et prépare les feuilles nécessaires du fichier Excel."""
-    xls = pd.ExcelFile(io.BytesIO(file_bytes), engine="openpyxl")
+@st.cache_resource
+def get_supabase_client():
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
-    # --- Feuille des pointages -------------------------------------------------
-    df_pointages = pd.read_excel(xls, sheet_name="temps_reel_operateur")
-    df_pointages["heure_debut"] = pd.to_datetime(df_pointages["heure_debut"])
-    df_pointages["heure_fin"] = pd.to_datetime(df_pointages["heure_fin"])
 
-    # La colonne "Durée h" fournie dans le fichier n'est pas fiable (valeurs
+def fetch_table(table: str, page_size: int = 1000) -> pd.DataFrame:
+    """Lit une table Supabase entière.
+
+    L'API Supabase renvoie au maximum 1000 lignes par requête : on pagine donc
+    (tri par id pour que les pages soient stables).
+    """
+    client = get_supabase_client()
+    rows, start = [], 0
+    while True:
+        batch = (
+            client.table(table)
+            .select("*")
+            .order("id")
+            .range(start, start + page_size - 1)
+            .execute()
+            .data
+        )
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        start += page_size
+    if not rows:
+        # Cas typique : Row Level Security activée sans politique de lecture
+        # pour la clé utilisée -> Supabase renvoie 0 ligne sans erreur.
+        raise ValueError(
+            f"la table « {table} » est vide ou illisible avec la clé fournie "
+            "(vérifier les politiques RLS de Supabase)."
+        )
+    return pd.DataFrame(rows)
+
+
+def to_local_datetime(serie: pd.Series) -> pd.Series:
+    """Convertit une colonne date/heure Supabase en heure locale sans fuseau.
+
+    Les colonnes "timestamptz" arrivent en UTC : on les ramène à l'heure de
+    Paris pour que les semaines / mois soient découpés sur l'heure locale.
+    """
+    serie = pd.to_datetime(serie, errors="coerce", utc=False, format="ISO8601")
+    if serie.dt.tz is not None:
+        serie = serie.dt.tz_convert(FUSEAU_HORAIRE).dt.tz_localize(None)
+    return serie
+
+
+@st.cache_data(ttl=DUREE_CACHE_S, show_spinner="Lecture des données Supabase…")
+def load_data():
+    """Charge et prépare les tables nécessaires depuis Supabase."""
+    # --- Table des pointages ---------------------------------------------------
+    df_pointages = fetch_table(TABLE_POINTAGES)
+    for col in ["created_at", "heure_debut", "heure_fin"]:
+        df_pointages[col] = to_local_datetime(df_pointages[col])
+    df_pointages["duree"] = pd.to_numeric(df_pointages["duree"], errors="coerce")
+
+    # La colonne "Durée h" fournie dans la base n'est pas fiable (valeurs
     # décalées / manquantes sur une grande partie des lignes). On recalcule
     # donc la durée en heures à partir de la colonne "duree" (en millisecondes),
     # qui elle correspond bien à l'écart heure_fin - heure_debut.
@@ -62,9 +118,12 @@ def load_data(file_bytes: bytes):
     df_pointages["cal_year"] = df_pointages["heure_debut"].dt.year
     df_pointages["cal_month"] = df_pointages["heure_debut"].dt.month
 
-    # --- Feuille des ordres de fabrication --------------------------------------
-    df_of = pd.read_excel(xls, sheet_name="ordres_fabrication")
-    df_of["date_cloture"] = pd.to_datetime(df_of["date_cloture"])
+    # --- Table des ordres de fabrication ---------------------------------------
+    df_of = fetch_table(TABLE_OF)
+    for col in ["created_at", "date_cloture"]:
+        df_of[col] = to_local_datetime(df_of[col])
+    for col in ["temps_devis", "temps_operateurs"]:
+        df_of[col] = pd.to_numeric(df_of[col], errors="coerce")
     df_of["temps_devis_h"] = df_of["temps_devis"] / MS_PER_HOUR
     df_of["temps_operateurs_h"] = df_of["temps_operateurs"] / MS_PER_HOUR
 
@@ -259,30 +318,22 @@ def pie_top_n(df: pd.DataFrame, group_col: str, value_col: str, n: int = 12):
 
 
 # ---------------------------------------------------------------------------
-# Interface — chargement du fichier
+# Interface — chargement des données
 # ---------------------------------------------------------------------------
 
 st.title("📊 Suivi d'activité hebdomadaire")
 
 with st.sidebar:
     st.header("📁 Données")
-    uploaded_file = st.file_uploader(
-        "Charger le fichier de données (.xlsx)",
-        type=["xlsx"],
-        help="Fichier contenant les feuilles 'temps_reel_operateur' et 'ordres_fabrication'.",
-    )
-    if st.button("🔄 Vider le cache et recharger", help="À utiliser si vous venez de mettre à jour le fichier source et que les chiffres semblent obsolètes."):
+    st.caption(f"Source : Supabase — actualisation automatique toutes les {DUREE_CACHE_S // 60} min.")
+    if st.button("🔄 Actualiser maintenant", help="Relit immédiatement les données dans Supabase."):
         st.cache_data.clear()
         st.rerun()
 
-if uploaded_file is None:
-    st.info("👈 Chargez votre fichier Excel de données dans la barre latérale pour démarrer.")
-    st.stop()
-
 try:
-    df_pointages, df_of = load_data(uploaded_file.getvalue())
+    df_pointages, df_of = load_data()
 except Exception as e:
-    st.error(f"Impossible de lire le fichier : {e}")
+    st.error(f"Impossible de lire les données Supabase : {e}")
     st.stop()
 
 # ---------------------------------------------------------------------------
@@ -301,7 +352,7 @@ with tab_hebdo:
 
     weeks_df = build_week_options(df_pointages, df_of)
     if weeks_df.empty:
-        st.warning("Aucune semaine exploitable n'a été trouvée dans le fichier.")
+        st.warning("Aucune semaine exploitable n'a été trouvée dans la base.")
         st.stop()
 
     with st.sidebar:
@@ -314,9 +365,9 @@ with tab_hebdo:
 
     st.caption(f"Semaine sélectionnée : **du {monday.strftime('%d/%m/%Y')} au {sunday.strftime('%d/%m/%Y')}**")
     st.caption(
-        f"🕒 Dernière date de clôture présente dans le fichier chargé : "
+        f"🕒 Dernière date de clôture présente dans la base : "
         f"**{df_of['date_cloture'].max().strftime('%d/%m/%Y') if df_of['date_cloture'].notna().any() else 'aucune'}** "
-        f"— si cette date vous semble ancienne, cliquez sur « Vider le cache et recharger »."
+        f"— pour forcer la mise à jour, cliquez sur « Actualiser maintenant »."
     )
 
     # ---------------------------------------------------------------------------
@@ -389,7 +440,7 @@ with tab_hebdo:
             st.info("Aucun pointage sur cette semaine.")
 
     st.caption(
-        "ℹ️ Dans le fichier source, le champ « ordre de fabrication » des pointages correspond "
+        "ℹ️ Dans la base source, le champ « ordre de fabrication » des pointages correspond "
         "au numéro de dossier."
     )
 
@@ -740,7 +791,7 @@ with tab_mensuel:
 
     months_df = build_month_options(df_pointages, df_of)
     if months_df.empty:
-        st.warning("Aucun mois exploitable n'a été trouvé dans le fichier.")
+        st.warning("Aucun mois exploitable n'a été trouvé dans la base.")
         st.stop()
 
     with st.sidebar:
@@ -755,9 +806,9 @@ with tab_mensuel:
 
     st.caption(f"Mois sélectionné : **du {premier_jour.strftime('%d/%m/%Y')} au {dernier_jour.strftime('%d/%m/%Y')}**")
     st.caption(
-        f"🕒 Dernière date de clôture présente dans le fichier chargé : "
+        f"🕒 Dernière date de clôture présente dans la base : "
         f"**{df_of['date_cloture'].max().strftime('%d/%m/%Y') if df_of['date_cloture'].notna().any() else 'aucune'}** "
-        f"— si cette date vous semble ancienne, cliquez sur « Vider le cache et recharger »."
+        f"— pour forcer la mise à jour, cliquez sur « Actualiser maintenant »."
     )
 
     # ---------------------------------------------------------------------------
@@ -833,7 +884,7 @@ with tab_mensuel:
             st.info("Aucun pointage sur ce mois.")
 
     st.caption(
-        "ℹ️ Dans le fichier source, le champ « ordre de fabrication » des pointages correspond "
+        "ℹ️ Dans la base source, le champ « ordre de fabrication » des pointages correspond "
         "au numéro de dossier."
     )
 
@@ -1178,7 +1229,7 @@ with tab_annuel:
     annees_disponibles = sorted(set(annees_pointages) | set(annees_of), reverse=True)
 
     if not annees_disponibles:
-        st.warning("Aucune année exploitable n'a été trouvée dans le fichier.")
+        st.warning("Aucune année exploitable n'a été trouvée dans la base.")
         st.stop()
 
     annee_defaut = 2026 if 2026 in annees_disponibles else annees_disponibles[0]
