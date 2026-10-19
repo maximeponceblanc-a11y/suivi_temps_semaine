@@ -7,6 +7,7 @@ Lancer avec :  streamlit run app.py
 Les données sont lues directement dans Supabase, tables :
   - temps_reel_operateur  (pointages des opérateurs)
   - ordres_fabrication    (ordres de fabrication / dossiers)
+  - employes              (nom / prénom des opérateurs)
 
 Identifiants à renseigner dans .streamlit/secrets.toml (en local) ou dans
 Settings > Secrets (Streamlit Community Cloud) :
@@ -32,6 +33,7 @@ MS_PER_HOUR = 3_600_000  # les durées "temps_devis" / "temps_operateurs" / "dur
                          # sont stockées en millisecondes dans la base source
 TABLE_POINTAGES = "temps_reel_operateur"
 TABLE_OF = "ordres_fabrication"
+TABLE_EMPLOYES = "employes"
 FUSEAU_HORAIRE = "Europe/Paris"
 DUREE_CACHE_S = 600  # les données sont relues dans Supabase au plus toutes les 10 min
 
@@ -146,7 +148,45 @@ def load_data():
         + df_pointages["client"].fillna("Client inconnu")
     )
 
+    # --- Jointure opérateur -> "Prénom NOM" (via la table employes) -------------
+    # id_operateur de temps_reel_operateur = id de la table employes.
+    # On garde id_operateur pour les comptages (nunique) et on ajoute une
+    # colonne "operateur" lisible pour l'affichage.
+    df_pointages["operateur"] = build_operateur_labels(df_pointages["id_operateur"])
+
     return df_pointages, df_of
+
+
+def _normalise_id(serie: pd.Series) -> pd.Series:
+    """Ramène un identifiant (int, float, texte) à une clé texte comparable."""
+    return pd.to_numeric(serie, errors="coerce").astype("Int64").astype(str)
+
+
+def build_operateur_labels(ids_operateur: pd.Series) -> pd.Series:
+    """Renvoie "Prénom NOM" pour chaque id_operateur (repli : "Opérateur #id")."""
+    cles = _normalise_id(ids_operateur)
+    repli = ("Opérateur #" + cles).where(cles != "<NA>", "Opérateur inconnu")
+    try:
+        df_emp = fetch_table(TABLE_EMPLOYES)
+    except Exception as e:  # table illisible -> on garde les id, sans bloquer le dashboard
+        st.warning(f"Noms des opérateurs indisponibles ({e}). Affichage des identifiants.")
+        return repli.fillna("Opérateur inconnu")
+
+    df_emp = df_emp.copy()
+    df_emp["cle"] = _normalise_id(df_emp["id"])
+    df_emp["libelle"] = (
+        df_emp.get("prenom", pd.Series("", index=df_emp.index)).fillna("").astype(str).str.strip()
+        + " "
+        + df_emp.get("nom", pd.Series("", index=df_emp.index)).fillna("").astype(str).str.strip().str.upper()
+    ).str.strip()
+    df_emp.loc[df_emp["libelle"] == "", "libelle"] = "Opérateur #" + df_emp["cle"]
+
+    # Homonymes éventuels : on ajoute l'id pour les distinguer dans les graphiques
+    doublons = df_emp["libelle"].duplicated(keep=False)
+    df_emp.loc[doublons, "libelle"] = df_emp.loc[doublons, "libelle"] + " (#" + df_emp.loc[doublons, "cle"] + ")"
+
+    noms = cles.map(df_emp.drop_duplicates("cle").set_index("cle")["libelle"])
+    return noms.fillna(repli).fillna("Opérateur inconnu")
 
 
 # ---------------------------------------------------------------------------
@@ -428,8 +468,8 @@ with tab_hebdo:
     with col_pie2:
         st.markdown("**Répartition du nombre d'heures par opérateur**")
         if not pointages_semaine.empty:
-            data2 = pie_top_n(pointages_semaine, "id_operateur", "Durée h")
-            fig2 = px.pie(data2, names="id_operateur", values="Durée h", hole=0.35)
+            data2 = pie_top_n(pointages_semaine, "operateur", "Durée h")
+            fig2 = px.pie(data2, names="operateur", values="Durée h", hole=0.35)
             fig2.update_traces(
                 textposition="inside",
                 textinfo="label+percent",
@@ -447,7 +487,7 @@ with tab_hebdo:
     st.markdown("**Détail des pointages de la semaine**")
     if not pointages_semaine.empty:
         table_pointages = pointages_semaine[
-            ["id", "created_at", "id_operateur", "operation", "ordre_fabrication", "heure_debut", "heure_fin", "Durée h"]
+            ["id", "created_at", "operateur", "operation", "ordre_fabrication", "heure_debut", "heure_fin", "Durée h"]
         ].sort_values("heure_debut", ascending=False).reset_index(drop=True)
         table_pointages["Durée h"] = table_pointages["Durée h"].round(2)
         st.dataframe(table_pointages, use_container_width=True, hide_index=True)
@@ -872,8 +912,8 @@ with tab_mensuel:
     with col_pie2_m:
         st.markdown("**Répartition du nombre d'heures par opérateur**")
         if not pointages_mois.empty:
-            data2_m = pie_top_n(pointages_mois, "id_operateur", "Durée h")
-            fig2_m = px.pie(data2_m, names="id_operateur", values="Durée h", hole=0.35)
+            data2_m = pie_top_n(pointages_mois, "operateur", "Durée h")
+            fig2_m = px.pie(data2_m, names="operateur", values="Durée h", hole=0.35)
             fig2_m.update_traces(
                 textposition="inside",
                 textinfo="label+percent",
@@ -891,7 +931,7 @@ with tab_mensuel:
     st.markdown("**Détail des pointages du mois**")
     if not pointages_mois.empty:
         table_pointages_m = pointages_mois[
-            ["id", "created_at", "id_operateur", "operation", "ordre_fabrication", "heure_debut", "heure_fin", "Durée h"]
+            ["id", "created_at", "operateur", "operation", "ordre_fabrication", "heure_debut", "heure_fin", "Durée h"]
         ].sort_values("heure_debut", ascending=False).reset_index(drop=True)
         table_pointages_m["Durée h"] = table_pointages_m["Durée h"].round(2)
         st.dataframe(table_pointages_m, use_container_width=True, hide_index=True, key="df_pointages_mensuel")
