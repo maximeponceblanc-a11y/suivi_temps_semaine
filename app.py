@@ -27,7 +27,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from supabase import create_client
 
 st.set_page_config(
-    page_title="Suivi d'activité hebdomadaire",
+    page_title="Suivi d'activité",
     page_icon="📊",
     layout="wide",
 )
@@ -172,17 +172,18 @@ def _normalise_id(serie: pd.Series) -> pd.Series:
     return pd.to_numeric(serie, errors="coerce").astype("Int64").astype(str)
 
 
-def build_operateur_labels(ids_operateur: pd.Series) -> pd.Series:
-    """Renvoie "Prénom NOM" pour chaque id_operateur (repli : "Opérateur #id")."""
-    cles = _normalise_id(ids_operateur)
-    repli = ("Opérateur #" + cles).where(cles != "<NA>", "Opérateur inconnu")
-    try:
-        df_emp = fetch_table(TABLE_EMPLOYES)
-    except Exception as e:  # table illisible -> on garde les id, sans bloquer le dashboard
-        st.warning(f"Noms des opérateurs indisponibles ({e}). Affichage des identifiants.")
-        return repli.fillna("Opérateur inconnu")
+@st.cache_data(ttl=DUREE_CACHE_S, show_spinner=False)
+def load_employes() -> pd.DataFrame:
+    """Table employes + colonnes "cle" (id normalisé) et "libelle" ("Prénom NOM").
 
-    df_emp = df_emp.copy()
+    Renvoie un DataFrame vide si la table est illisible (le dashboard affiche
+    alors les identifiants).
+    """
+    try:
+        df_emp = fetch_table(TABLE_EMPLOYES).copy()
+    except Exception:
+        return pd.DataFrame(columns=["cle", "libelle"])
+
     df_emp["cle"] = _normalise_id(df_emp["id"])
     df_emp["libelle"] = (
         df_emp.get("prenom", pd.Series("", index=df_emp.index)).fillna("").astype(str).str.strip()
@@ -194,8 +195,18 @@ def build_operateur_labels(ids_operateur: pd.Series) -> pd.Series:
     # Homonymes éventuels : on ajoute l'id pour les distinguer dans les graphiques
     doublons = df_emp["libelle"].duplicated(keep=False)
     df_emp.loc[doublons, "libelle"] = df_emp.loc[doublons, "libelle"] + " (#" + df_emp.loc[doublons, "cle"] + ")"
+    return df_emp.drop_duplicates("cle")
 
-    noms = cles.map(df_emp.drop_duplicates("cle").set_index("cle")["libelle"])
+
+def build_operateur_labels(ids_operateur: pd.Series) -> pd.Series:
+    """Renvoie "Prénom NOM" pour chaque id_operateur (repli : "Opérateur #id")."""
+    cles = _normalise_id(ids_operateur)
+    repli = ("Opérateur #" + cles).where(cles != "<NA>", "Opérateur inconnu")
+    df_emp = load_employes()
+    if df_emp.empty:
+        st.warning("Noms des opérateurs indisponibles (table employes illisible). Affichage des identifiants.")
+        return repli.fillna("Opérateur inconnu")
+    noms = cles.map(df_emp.set_index("cle")["libelle"])
     return noms.fillna(repli).fillna("Opérateur inconnu")
 
 
@@ -209,6 +220,8 @@ def week_bounds(iso_year: int, iso_week: int) -> tuple[date, date]:
     sunday = monday + timedelta(days=6)
     return monday, sunday
 
+
+JOURS_SEMAINE = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
 
 NOMS_MOIS = [
     "Janvier", "Février", "Mars", "Avril", "Mai", "Juin",
@@ -486,6 +499,8 @@ def afficher_tableau(df: pd.DataFrame, key: str, style_ligne=None, hauteur_max: 
         elif pd.api.types.is_numeric_dtype(serie) and col != "id":
             if "%" in col:
                 fmt = _js_format_nombre(0, "%")
+            elif pd.api.types.is_integer_dtype(serie):
+                fmt = _js_format_nombre(0)
             else:
                 fmt = _js_format_nombre(2)
             gb.configure_column(
@@ -527,7 +542,7 @@ def afficher_tableau(df: pd.DataFrame, key: str, style_ligne=None, hauteur_max: 
 # Interface — chargement des données
 # ---------------------------------------------------------------------------
 
-st.title("📊 Suivi d'activité hebdomadaire")
+st.title("📊 Suivi d'activité")
 
 with st.sidebar:
     st.header("📁 Données")
@@ -543,12 +558,231 @@ except Exception as e:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# Onglets — Suivi hebdomadaire / Bilan annuel
+# Onglets — Suivi journalier / hebdomadaire / mensuel / Bilan annuel
 # ---------------------------------------------------------------------------
 
-tab_hebdo, tab_mensuel, tab_annuel = st.tabs(
-    ["📊 Suivi hebdomadaire", "📆 Suivi mensuel", "📅 Bilan annuel"]
+tab_jour, tab_hebdo, tab_mensuel, tab_annuel = st.tabs(
+    ["🕐 Suivi journalier", "📊 Suivi hebdomadaire", "📆 Suivi mensuel", "📅 Bilan annuel"]
 )
+
+with tab_jour:
+
+    # ---------------------------------------------------------------------------
+    # Sélecteur de jour
+    # ---------------------------------------------------------------------------
+    maintenant = pd.Timestamp.now(tz=FUSEAU_HORAIRE).tz_localize(None)
+    aujourdhui = maintenant.date()
+    jours_avec_pointages = sorted(df_pointages["heure_debut"].dropna().dt.date.unique())
+
+    if "jour_sel" not in st.session_state:
+        st.session_state["jour_sel"] = (
+            aujourdhui if (not jours_avec_pointages or aujourdhui in jours_avec_pointages)
+            else jours_avec_pointages[-1]
+        )
+
+    def _aller_au_jour(sens: int) -> None:
+        """Passe au jour précédent / suivant ayant des pointages."""
+        courant = st.session_state["jour_sel"]
+        if sens < 0:
+            candidats = [j for j in jours_avec_pointages if j < courant]
+            if candidats:
+                st.session_state["jour_sel"] = candidats[-1]
+        else:
+            candidats = [j for j in jours_avec_pointages if j > courant]
+            if candidats:
+                st.session_state["jour_sel"] = candidats[0]
+
+    def _aller_a_aujourdhui() -> None:
+        st.session_state["jour_sel"] = aujourdhui
+
+    nav1, nav2, nav3, nav4 = st.columns([1, 2, 1, 1])
+    nav1.button("◀ Jour précédent", on_click=_aller_au_jour, args=(-1,), use_container_width=True,
+                help="Jour précédent ayant des pointages")
+    with nav2:
+        st.date_input("Jour affiché", key="jour_sel", format="DD/MM/YYYY", label_visibility="collapsed")
+    nav3.button("Jour suivant ▶", on_click=_aller_au_jour, args=(1,), use_container_width=True,
+                help="Jour suivant ayant des pointages")
+    nav4.button("Aujourd'hui", on_click=_aller_a_aujourdhui, use_container_width=True)
+
+    jour = st.session_state["jour_sel"]
+    est_aujourdhui = jour == aujourdhui
+    st.caption(
+        f"Journée du **{JOURS_SEMAINE[jour.weekday()]} {jour.strftime('%d/%m/%Y')}**"
+        + (" — en cours (les pointages non terminés sont prolongés jusqu'à maintenant)" if est_aujourdhui else "")
+    )
+
+    pointages_jour = df_pointages.loc[df_pointages["heure_debut"].dt.date == jour].copy()
+
+    if pointages_jour.empty:
+        st.info("Aucun pointage ce jour-là. Utilisez ◀ / ▶ pour passer au jour précédent / suivant ayant des pointages.")
+    else:
+        # --- Fin "affichée" des pointages non terminés ------------------------
+        en_cours = pointages_jour["heure_fin"].isna()
+        fin_estimee = pointages_jour["heure_debut"] + pd.to_timedelta(pointages_jour["duree"], unit="ms")
+        fin_par_defaut = maintenant if est_aujourdhui else pointages_jour["heure_debut"] + pd.Timedelta(minutes=15)
+        pointages_jour["fin_affichee"] = (
+            pointages_jour["heure_fin"].fillna(fin_estimee.where(fin_estimee > pointages_jour["heure_debut"]))
+        )
+        pointages_jour.loc[pointages_jour["fin_affichee"].isna(), "fin_affichee"] = fin_par_defaut
+        pointages_jour["fin_affichee"] = pointages_jour[["fin_affichee", "heure_debut"]].max(axis=1)
+        pointages_jour["Statut"] = np.where(en_cours, "En cours / non clôturé", "Terminé")
+        # Durée affichée : durée enregistrée, sinon durée jusqu'à la fin affichée
+        pointages_jour["Durée affichée h"] = pointages_jour["Durée h"].where(
+            ~en_cours | pointages_jour["Durée h"].gt(0),
+            (pointages_jour["fin_affichee"] - pointages_jour["heure_debut"]).dt.total_seconds() / 3600,
+        ).clip(lower=0)
+
+        # --- Indicateurs ------------------------------------------------------
+        nb_op_jour = pointages_jour["id_operateur"].nunique()
+        heures_jour = pointages_jour["Durée affichée h"].sum()
+        nb_en_cours = int(en_cours.sum())
+
+        st.subheader("👷 Activité de la journée")
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Opérateurs ayant pointé", f"{nb_op_jour}")
+        k2.metric("Heures pointées", f"{heures_jour:.1f} h",
+                  help="Somme des durées des pointages de la journée (pointages en cours inclus jusqu'à maintenant).")
+        k3.metric("Moyenne par opérateur", f"{heures_jour / nb_op_jour:.1f} h" if nb_op_jour else "–",
+                  help=f"À comparer aux {TAUX_HORAIRE_JOUR:.1f} h théoriques d'une journée.")
+        k4.metric("Dossiers travaillés", f"{pointages_jour['ordre_fabrication'].nunique()}")
+        k5.metric("Pointages en cours / non clôturés", f"{nb_en_cours}",
+                  help="Pointages sans heure de fin.")
+
+        # --- Opérateurs actifs n'ayant pas pointé ----------------------------
+        df_emp = load_employes()
+        if not df_emp.empty and {"fonction", "actif"}.issubset(df_emp.columns):
+            actif = df_emp["actif"].astype(str).str.lower().isin(["true", "1", "t", "oui", "yes"])
+            operateurs_actifs = df_emp.loc[
+                actif & df_emp["fonction"].astype(str).str.lower().str.startswith("operat")
+            ]
+            ids_jour = set(_normalise_id(pointages_jour["id_operateur"]))
+            absents = operateurs_actifs.loc[~operateurs_actifs["cle"].isin(ids_jour), "libelle"].sort_values()
+            if len(absents):
+                with st.expander(f"⚠️ {len(absents)} opérateur(s) actif(s) sans aucun pointage ce jour-là"):
+                    st.write(" · ".join(absents))
+                    st.caption("Absence, congé… ou oubli de pointage.")
+
+        # --- Chronologie (Gantt) ---------------------------------------------
+        st.markdown("**Chronologie des pointages**")
+        couleur_par = st.radio(
+            "Couleur par", ["Dossier", "Opération"], horizontal=True, key="gantt_couleur_jour",
+        )
+        col_couleur = "dossier_client" if couleur_par == "Dossier" else "operation"
+
+        ordre_ops = (
+            pointages_jour.groupby("operateur")["heure_debut"].min().sort_values().index.tolist()
+        )
+        donnees_gantt = pointages_jour.assign(
+            debut_txt=pointages_jour["heure_debut"].dt.strftime("%H:%M"),
+            fin_txt=np.where(en_cours, "en cours", pointages_jour["fin_affichee"].dt.strftime("%H:%M")),
+            duree_txt=pointages_jour["Durée affichée h"].map(lambda h: f"{int(h)} h {round((h % 1) * 60):02d}" if pd.notna(h) else "–"),
+        )
+        fig_gantt = px.timeline(
+            donnees_gantt,
+            x_start="heure_debut", x_end="fin_affichee", y="operateur",
+            color=col_couleur,
+            pattern_shape="Statut",
+            pattern_shape_map={"Terminé": "", "En cours / non clôturé": "/"},
+            category_orders={"operateur": ordre_ops},
+            custom_data=["operation", "dossier_client", "debut_txt", "fin_txt", "duree_txt"],
+        )
+        # Une seule entrée de légende par dossier/opération (le hachurage suffit pour le statut)
+        deja_en_legende = set()
+        for trace in fig_gantt.data:
+            nom = trace.name.rsplit(", ", 1)[0] if trace.name else trace.name
+            trace.name, trace.legendgroup = nom, nom
+            trace.showlegend = nom not in deja_en_legende
+            deja_en_legende.add(nom)
+        fig_gantt.update_traces(
+            hovertemplate=(
+                "<b>%{y}</b><br>%{customdata[2]} → %{customdata[3]} (%{customdata[4]})"
+                "<br>Opération : %{customdata[0]}<br>Dossier : %{customdata[1]}<extra></extra>"
+            ),
+            marker_line_width=0.5, marker_line_color="white",
+        )
+        debut_axe = min(pointages_jour["heure_debut"].min().floor("h"), pd.Timestamp(jour) + pd.Timedelta(hours=7))
+        fin_axe = max(pointages_jour["fin_affichee"].max().ceil("h"), pd.Timestamp(jour) + pd.Timedelta(hours=17))
+        fig_gantt.update_xaxes(range=[debut_axe, fin_axe], tickformat="%H:%M", dtick=3_600_000,
+                               showgrid=True, title=None)
+        fig_gantt.update_yaxes(title=None, autorange="reversed")
+        if est_aujourdhui and debut_axe <= maintenant <= fin_axe:
+            fig_gantt.add_vline(x=maintenant, line_dash="dot", line_color="#d62728")
+            fig_gantt.add_annotation(x=maintenant, y=1.02, yref="paper", text="maintenant",
+                                     showarrow=False, font=dict(color="#d62728", size=11))
+        fig_gantt.update_layout(
+            height=120 + 38 * len(ordre_ops),
+            legend_title_text=couleur_par,
+            margin=dict(l=10, r=10, t=30, b=10),
+            bargap=0.25,
+        )
+        st.plotly_chart(fig_gantt, use_container_width=True, key="gantt_jour")
+        st.caption("Les blocs hachurés sont des pointages sans heure de fin (en cours ou oubli de clôture). "
+                   "Les espaces vides entre deux blocs correspondent à du temps non pointé.")
+
+        # --- Récapitulatif par opérateur -------------------------------------
+        st.markdown("**Récapitulatif par opérateur**")
+        recap = (
+            pointages_jour.sort_values("heure_debut")
+            .groupby("operateur")
+            .agg(
+                arrivee=("heure_debut", "min"),
+                depart=("fin_affichee", "max"),
+                heures_pointees=("Durée affichée h", "sum"),
+                nb_pointages=("id", "count"),
+                en_cours=("Statut", lambda x: int((x != "Terminé").sum())),
+                dossiers=("ordre_fabrication", lambda x: ", ".join(sorted(x.dropna().astype(str).unique()))),
+            )
+            .reset_index()
+        )
+        recap["amplitude_h"] = (recap["depart"] - recap["arrivee"]).dt.total_seconds() / 3600
+        recap["non_pointe_h"] = (recap["amplitude_h"] - recap["heures_pointees"]).clip(lower=0)
+        recap = recap.sort_values("arrivee")
+        recap["arrivee"] = recap["arrivee"].dt.strftime("%H:%M")
+        recap["depart"] = recap["depart"].dt.strftime("%H:%M")
+        recap = recap.rename(columns={
+            "operateur": "Opérateur",
+            "arrivee": "Premier pointage",
+            "depart": "Dernière fin",
+            "amplitude_h": "Amplitude (h)",
+            "heures_pointees": "Heures pointées (h)",
+            "non_pointe_h": "Trous entre pointages (h)",
+            "nb_pointages": "Nb pointages",
+            "en_cours": "Non clôturés",
+            "dossiers": "Dossiers",
+        })[["Opérateur", "Premier pointage", "Dernière fin", "Amplitude (h)", "Heures pointées (h)",
+            "Trous entre pointages (h)", "Nb pointages", "Non clôturés", "Dossiers"]]
+
+        def _style_recap(row):
+            if row["Non clôturés"] > 0:
+                return ["background-color: #ffe5b4"] * len(row)   # orange : pointage à clôturer
+            if row["Trous entre pointages (h)"] > 0.5:
+                return ["background-color: #fff3cd"] * len(row)   # jaune : temps non pointé
+            return [""] * len(row)
+
+        afficher_tableau(recap, key="grille_recap_jour", style_ligne=_style_recap)
+        st.caption("🟧 Au moins un pointage sans heure de fin · 🟨 plus de 30 min non pointées entre "
+                   "le premier et le dernier pointage (pause déjeuner comprise).")
+
+        # --- Heures par dossier ----------------------------------------------
+        st.markdown("**Heures pointées par dossier**")
+        par_dossier = (
+            pointages_jour.groupby("dossier_client")["Durée affichée h"].sum()
+            .sort_values(ascending=True).reset_index()
+        )
+        fig_dossiers = px.bar(par_dossier, x="Durée affichée h", y="dossier_client", orientation="h",
+                              text_auto=".1f", color_discrete_sequence=[COULEUR_REALISE])
+        fig_dossiers.update_layout(height=80 + 28 * len(par_dossier), xaxis_title="Heures",
+                                   yaxis_title=None, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig_dossiers, use_container_width=True, key="bar_dossiers_jour")
+
+        # --- Détail -------------------------------------------------------------
+        st.markdown("**Détail des pointages de la journée**")
+        table_jour = pointages_jour[
+            ["id", "operateur", "operation", "ordre_fabrication", "heure_debut", "heure_fin", "Durée h", "Statut"]
+        ].sort_values(["heure_debut"]).reset_index(drop=True)
+        table_jour["Durée h"] = table_jour["Durée h"].round(2)
+        afficher_tableau(table_jour, key="grille_pointages_jour")
+
 
 with tab_hebdo:
 
