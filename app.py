@@ -451,7 +451,8 @@ function(p) {{
 }}""")
 
 
-def afficher_tableau(df: pd.DataFrame, key: str, style_ligne=None, hauteur_max: int = 450) -> None:
+def afficher_tableau(df: pd.DataFrame, key: str, style_ligne=None, hauteur_max: int = 450,
+                     selection: bool = False):
     """Affiche un tableau triable et filtrable depuis les en-têtes de colonnes.
 
     - Texte / identifiants : filtre « contient », « commence par »…
@@ -459,6 +460,8 @@ def afficher_tableau(df: pd.DataFrame, key: str, style_ligne=None, hauteur_max: 
     - Dates : filtre « avant », « après », « entre »…
     `style_ligne` : fonction (row -> liste de styles CSS) reprise des anciennes
     mises en couleur ; seule la couleur de fond est conservée.
+    `selection=True` : un clic sélectionne une ligne ; la fonction renvoie alors
+    la ligne sélectionnée (dict) ou None.
     """
     df = df.copy()
 
@@ -511,7 +514,8 @@ def afficher_tableau(df: pd.DataFrame, key: str, style_ligne=None, hauteur_max: 
             gb.configure_column(col, filter="agNumberColumnFilter", filterParams={"buttons": ["reset"]})
         else:
             df[col] = serie.astype("string").where(serie.notna(), None)
-            gb.configure_column(col, filter="agTextColumnFilter", filterParams={"buttons": ["reset"]})
+            extra = {"minWidth": 320, "wrapText": True, "autoHeight": True} if col == "Alertes" else {}
+            gb.configure_column(col, filter="agTextColumnFilter", filterParams={"buttons": ["reset"]}, **extra)
 
     gb.configure_grid_options(
         localeText=_TRADUCTION_AGGRID,
@@ -521,21 +525,192 @@ def afficher_tableau(df: pd.DataFrame, key: str, style_ligne=None, hauteur_max: 
         animateRows=False,
     )
 
+    if selection:
+        gb.configure_selection(selection_mode="single", use_checkbox=False)
+
     entete = 2 * 42 if LIGNE_DE_FILTRES else 42
     hauteur = min(hauteur_max, entete + 30 * max(len(df), 1) + 12)
 
-    AgGrid(
+    reponse = AgGrid(
         df,
         gridOptions=gb.build(),
         height=hauteur,
         theme="streamlit",
         allow_unsafe_jscode=True,
-        update_on=[],               # filtrer / trier ne relance pas le script
+        # filtrer / trier ne relance pas le script ; sélectionner une ligne, si
+        # la sélection est activée, oui (pour afficher le bouton de détail)
+        update_on=["selectionChanged"] if selection else [],
+        custom_css={
+            ".ag-row-selected": {"outline": "2px solid #0068C9 !important",
+                                 "outline-offset": "-2px", "font-weight": "600"},
+            ".ag-row": {"cursor": "pointer" if selection else "default"},
+        },
         show_toolbar=False,
         show_search=False,
         show_download_button=False,
         key=key,
     )
+    if not selection:
+        return None
+    lignes = reponse.selected_rows
+    if lignes is None or len(lignes) == 0:
+        return None
+    if isinstance(lignes, pd.DataFrame):
+        ligne = lignes.iloc[0].to_dict()
+    else:
+        ligne = dict(lignes[0])
+    ligne.pop("_couleur", None)
+    return ligne
+
+
+# ---------------------------------------------------------------------------
+# Détail des pointages d'une opération (fenêtre ouverte depuis
+# « Analyse d'un dossier spécifique »)
+# ---------------------------------------------------------------------------
+
+SEUIL_POINTAGE_SUSPECT_H = 10    # un pointage seul de plus de 10 h est suspect
+SEUIL_JOURNEE_SUSPECTE_H = 12    # plus de 12 h pointées par un opérateur sur une journée (toutes opérations)
+TOLERANCE_ECART_DUREE_MIN = 5    # écart toléré entre "duree" et (heure_fin - heure_debut)
+
+
+def _cle_texte(serie: pd.Series) -> pd.Series:
+    """Clé de comparaison souple : texte, sans espaces superflus, sans ".0", en minuscules."""
+    return (
+        serie.astype("string").str.strip().str.replace(r"\.0$", "", regex=True)
+        .str.replace(r"\s+", " ", regex=True).str.lower()
+    )
+
+
+def _alertes_pointages(pts: pd.DataFrame, tous_pointages: pd.DataFrame) -> pd.Series:
+    """Renvoie, pour chaque pointage, la liste des anomalies détectées (texte)."""
+    alertes = pd.Series([[] for _ in range(len(pts))], index=pts.index, dtype=object)
+
+    def ajouter(masque, texte):
+        for i in pts.index[masque.fillna(False)]:
+            alertes.at[i] = alertes.at[i] + [texte]
+
+    ajouter(pts["Durée h"] > SEUIL_POINTAGE_SUSPECT_H, f"Pointage > {SEUIL_POINTAGE_SUSPECT_H} h")
+    ajouter(pts["heure_fin"].isna(), "Pas d'heure de fin")
+    ajouter(pts["heure_fin"] < pts["heure_debut"], "Fin avant le début")
+    ajouter(
+        pts["heure_fin"].notna() & (pts["heure_fin"].dt.date != pts["heure_debut"].dt.date),
+        "Fin un autre jour",
+    )
+    ecart_min = (
+        (pts["heure_fin"] - pts["heure_debut"]).dt.total_seconds() / 60 - pts["duree"] / 60_000
+    ).abs()
+    ajouter(ecart_min > TOLERANCE_ECART_DUREE_MIN, "Durée ≠ fin − début")
+
+    # Journée de l'opérateur (tous dossiers confondus) anormalement longue
+    jour = tous_pointages["heure_debut"].dt.date
+    total_jour = tous_pointages.groupby([tous_pointages["id_operateur"], jour])["Durée h"].sum()
+    cle = list(zip(pts["id_operateur"], pts["heure_debut"].dt.date))
+    total_pts = pd.Series([total_jour.get(k, np.nan) for k in cle], index=pts.index)
+    ajouter(total_pts > SEUIL_JOURNEE_SUSPECTE_H,
+            f"Opérateur > {SEUIL_JOURNEE_SUSPECTE_H} h pointées ce jour-là")
+
+    # Chevauchement avec un autre pointage du même opérateur
+    pts_tries = tous_pointages.dropna(subset=["heure_debut"]).sort_values(["id_operateur", "heure_debut"])
+    fin_prec = pts_tries.groupby("id_operateur")["heure_fin"].shift()
+    debut_suiv = pts_tries.groupby("id_operateur")["heure_debut"].shift(-1)
+    chevauche = (pts_tries["heure_debut"] < fin_prec) | (pts_tries["heure_fin"] > debut_suiv)
+    ids_chevauchement = set(pts_tries.loc[chevauche.fillna(False), "id"])
+    ajouter(pts["id"].isin(ids_chevauchement), "Chevauche un autre pointage")
+
+    return alertes
+
+
+@st.dialog("🔎 Détail des pointages", width="large")
+def fenetre_detail_pointages(numero_dossier: str, operation: str, devis_h: float, realise_h: float) -> None:
+    st.markdown(f"**Dossier {numero_dossier}** — opération **{operation}**")
+
+    du_dossier = df_pointages[_cle_texte(df_pointages["ordre_fabrication"]) == _cle_texte(pd.Series([numero_dossier])).iloc[0]]
+    pts = du_dossier[_cle_texte(du_dossier["operation"]) == _cle_texte(pd.Series([operation])).iloc[0]].copy()
+
+    if pts.empty:
+        st.warning("Aucun pointage trouvé pour cette opération dans « temps_reel_operateur ».")
+        if not du_dossier.empty:
+            autres = (du_dossier.groupby("operation")["Durée h"].sum().sort_values(ascending=False).round(2)
+                      .rename("Heures pointées").reset_index())
+            st.markdown("Opérations pointées sur ce dossier (le libellé diffère peut-être légèrement) :")
+            st.dataframe(autres, hide_index=True, use_container_width=True)
+        return
+
+    somme_pts = pts["Durée h"].sum()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Temps devisé", f"{devis_h:.2f} h")
+    c2.metric("temps_operateurs (OF)", f"{realise_h:.2f} h",
+              help="Valeur de la table ordres_fabrication, affichée dans le tableau.")
+    c3.metric("Somme des pointages", f"{somme_pts:.2f} h",
+              help="Somme des pointages de temps_reel_operateur pour ce dossier et cette opération.")
+    c4.metric("Pointages / opérateurs", f"{len(pts)} / {pts['id_operateur'].nunique()}")
+
+    if pd.notna(realise_h) and abs(somme_pts - realise_h) > 0.05:
+        st.info(
+            f"La somme des pointages ({somme_pts:.2f} h) diffère du temps_operateurs de l'OF "
+            f"({realise_h:.2f} h) : l'OF n'est peut-être pas à jour, ou des pointages portent un "
+            "libellé d'opération différent."
+        )
+
+    pts["Alertes"] = _alertes_pointages(pts, df_pointages)
+    nb_suspects = int(pts["Alertes"].map(len).gt(0).sum())
+    if nb_suspects:
+        heures_suspectes = pts.loc[pts["Alertes"].map(len).gt(0), "Durée h"].sum()
+        st.error(f"⚠️ {nb_suspects} pointage(s) suspect(s), soit {heures_suspectes:.2f} h "
+                 f"({heures_suspectes / somme_pts:.0%} du total pointé). Ils sont surlignés en rouge ci-dessous.")
+    else:
+        st.success("Aucune anomalie détectée : les heures semblent correspondre à du temps réel de production.")
+
+    # Heures par jour et par opérateur : un pic isolé saute aux yeux
+    st.markdown("**Heures pointées par jour**")
+    par_jour = (pts.assign(jour=pts["heure_debut"].dt.normalize())
+                .groupby(["jour", "operateur"], as_index=False)["Durée h"].sum())
+    fig = px.bar(par_jour, x="jour", y="Durée h", color="operateur",
+                 labels={"jour": "", "Durée h": "Heures", "operateur": "Opérateur"})
+    fig.update_xaxes(tickformat="%d/%m/%Y")
+    fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), bargap=0.3)
+    st.plotly_chart(fig, use_container_width=True, key=f"bar_detail_{numero_dossier}_{operation}")
+
+    st.markdown("**Pointages**")
+    table = pts.sort_values("heure_debut")[
+        ["id", "operateur", "heure_debut", "heure_fin", "Durée h", "Alertes"]
+    ].reset_index(drop=True)
+    table["Durée h"] = table["Durée h"].round(2)
+    table["Alertes"] = table["Alertes"].map(lambda a: " · ".join(a))
+    afficher_tableau(
+        table, key=f"grille_detail_{numero_dossier}_{operation}",
+        style_ligne=lambda r: ["background-color: #f8d7da" if r["Alertes"] else ""] * len(r),
+    )
+
+    st.markdown("**Total par opérateur**")
+    par_op = (pts.groupby("operateur")
+              .agg(heures=("Durée h", "sum"), pointages=("id", "count"),
+                   premier=("heure_debut", "min"), dernier=("heure_debut", "max"))
+              .sort_values("heures", ascending=False).reset_index())
+    par_op["heures"] = par_op["heures"].round(2)
+    par_op["premier"] = par_op["premier"].dt.strftime("%d/%m/%Y")
+    par_op["dernier"] = par_op["dernier"].dt.strftime("%d/%m/%Y")
+    st.dataframe(
+        par_op.rename(columns={"operateur": "Opérateur", "heures": "Heures", "pointages": "Pointages",
+                               "premier": "Premier jour", "dernier": "Dernier jour"}),
+        hide_index=True, use_container_width=True,
+    )
+
+
+def bouton_detail_pointages(ligne: dict | None, numero_dossier: str, key: str) -> None:
+    """Bouton sous le tableau des opérations : ouvre le détail de la ligne sélectionnée."""
+    if ligne is None:
+        st.button("🔎 Voir le détail des pointages", key=key, disabled=True,
+                  help="Cliquez d'abord sur une ligne du tableau.")
+        st.caption("Cliquez sur une ligne du tableau pour pouvoir afficher le détail de ses pointages.")
+        return
+    operation = ligne.get("operation")
+    if st.button(f"🔎 Voir le détail des pointages — {operation}", key=key, type="primary"):
+        fenetre_detail_pointages(
+            str(numero_dossier), str(operation),
+            pd.to_numeric(ligne.get("temps_devis (h)"), errors="coerce"),
+            pd.to_numeric(ligne.get("temps_operateurs (h)"), errors="coerce"),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1184,7 +1359,9 @@ with tab_hebdo:
                     color = "background-color: #d4edda"  # Vert : dans la tolérance
                 return [color] * len(row)
 
-            afficher_tableau(table_spec_of, key="grille_table_spec_of", style_ligne=highlight_row_spec)
+            ligne_choisie = afficher_tableau(table_spec_of, key="grille_table_spec_of",
+                                             style_ligne=highlight_row_spec, selection=True)
+            bouton_detail_pointages(ligne_choisie, dossier_choisi, key="btn_detail_hebdo")
             st.caption(
                 "⬜ Opération non pointée (0h) · "
                 "🟥 Écart trop positif (dépassement d'heures) · "
@@ -1597,7 +1774,9 @@ with tab_mensuel:
                     color = "background-color: #d4edda"  # Vert : dans la tolérance
                 return [color] * len(row)
 
-            afficher_tableau(table_spec_of_m, key="grille_table_spec_of_m", style_ligne=highlight_row_spec_mensuel)
+            ligne_choisie_m = afficher_tableau(table_spec_of_m, key="grille_table_spec_of_m",
+                                               style_ligne=highlight_row_spec_mensuel, selection=True)
+            bouton_detail_pointages(ligne_choisie_m, dossier_choisi_m, key="btn_detail_mensuel")
             st.caption(
                 "⬜ Opération non pointée (0h) · "
                 "🟥 Écart trop positif (dépassement d'heures) · "
