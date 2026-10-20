@@ -38,6 +38,12 @@ TABLE_POINTAGES = "temps_reel_operateur"
 TABLE_OF = "ordres_fabrication"
 TABLE_EMPLOYES = "employes"
 FUSEAU_HORAIRE = "Europe/Paris"
+# Les heures de pointage sont enregistrées dans Supabase avec l'heure de Paris
+# telle quelle, mais étiquetées "+00" (UTC). Un pointage à 7h00 apparaît donc
+# "07:00:00+00" dans Supabase. Les reconvertir en heure de Paris ajoutait à tort
+# +2 h en été / +1 h en hiver. True = on lit l'heure stockée telle quelle.
+# (Passer à False si la source enregistre un jour de vraies heures UTC.)
+HEURES_DEJA_EN_HEURE_LOCALE = True
 DUREE_CACHE_S = 600  # les données sont relues dans Supabase au plus toutes les 10 min
 
 # ---------------------------------------------------------------------------
@@ -93,13 +99,14 @@ def fetch_table(table: str, page_size: int = 1000) -> pd.DataFrame:
 def to_local_datetime(serie: pd.Series) -> pd.Series:
     """Convertit une colonne date/heure Supabase en heure locale sans fuseau.
 
-    Les colonnes "timestamptz" arrivent en UTC : on les ramène à l'heure de
-    Paris pour que les semaines / mois soient découpés sur l'heure locale.
+    Voir HEURES_DEJA_EN_HEURE_LOCALE : soit l'heure stockée est déjà l'heure
+    de Paris (on retire juste l'étiquette de fuseau), soit c'est une vraie
+    heure UTC (on la convertit en heure de Paris).
     """
-    serie = pd.to_datetime(serie, errors="coerce", utc=False, format="ISO8601")
-    if serie.dt.tz is not None:
-        serie = serie.dt.tz_convert(FUSEAU_HORAIRE).dt.tz_localize(None)
-    return serie
+    serie = pd.to_datetime(serie, errors="coerce", utc=True, format="ISO8601")
+    if HEURES_DEJA_EN_HEURE_LOCALE:
+        return serie.dt.tz_localize(None)
+    return serie.dt.tz_convert(FUSEAU_HORAIRE).dt.tz_localize(None)
 
 
 @st.cache_data(ttl=DUREE_CACHE_S, show_spinner="Lecture des données Supabase…")
