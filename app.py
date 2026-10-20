@@ -15,6 +15,7 @@ Settings > Secrets (Streamlit Community Cloud) :
   SUPABASE_KEY = "..."
 """
 
+import json
 import re
 from datetime import date, timedelta
 
@@ -22,6 +23,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from supabase import create_client
 
 st.set_page_config(
@@ -358,78 +360,160 @@ def pie_top_n(df: pd.DataFrame, group_col: str, value_col: str, n: int = 12):
     return agg.reset_index()
 
 
+# ---------------------------------------------------------------------------
+# Affichage des tableaux : AgGrid (tri + filtre directement dans les en-têtes)
+# ---------------------------------------------------------------------------
+
 # Colonnes numériques à filtrer comme du texte (identifiants, numéros…)
-_COLONNES_IDENTIFIANTS = re.compile(r"(^id$|^id_|numero|ordre_fabrication|reference)", re.IGNORECASE)
-_MAX_VALEURS_LISTE = 60  # au-delà, filtre "contient" plutôt qu'une liste de choix
+_COLONNES_IDENTIFIANTS = re.compile(r"(numero|ordre_fabrication|reference|dossier)", re.IGNORECASE)
+# Ligne de filtres affichée sous les en-têtes (en plus de l'icône de filtre de chaque colonne)
+LIGNE_DE_FILTRES = True
+
+_TRADUCTION_AGGRID = {
+    # Filtres
+    "filterOoo": "Filtrer…", "searchOoo": "Rechercher…", "equals": "Égal à",
+    "notEqual": "Différent de", "blank": "Vide", "notBlank": "Non vide",
+    "empty": "Choisir…", "lessThan": "Inférieur à", "greaterThan": "Supérieur à",
+    "lessThanOrEqual": "Inférieur ou égal à", "greaterThanOrEqual": "Supérieur ou égal à",
+    "inRange": "Entre", "inRangeStart": "De", "inRangeEnd": "À",
+    "contains": "Contient", "notContains": "Ne contient pas",
+    "startsWith": "Commence par", "endsWith": "Se termine par",
+    "before": "Avant", "after": "Après", "dateFormatOoo": "jj/mm/aaaa",
+    "andCondition": "ET", "orCondition": "OU",
+    "applyFilter": "Appliquer", "resetFilter": "Réinitialiser",
+    "clearFilter": "Effacer", "cancelFilter": "Annuler",
+    # Menu de colonne / divers
+    "sortAscending": "Tri croissant", "sortDescending": "Tri décroissant",
+    "sortUnSort": "Annuler le tri", "pinColumn": "Épingler la colonne",
+    "pinLeft": "Épingler à gauche", "pinRight": "Épingler à droite",
+    "noPin": "Ne pas épingler", "autosizeThisColumn": "Ajuster cette colonne",
+    "autosizeAllColumns": "Ajuster toutes les colonnes", "resetColumns": "Réinitialiser les colonnes",
+    "columnFilter": "Filtre de colonne", "columnChooser": "Choisir les colonnes",
+    "noRowsToShow": "Aucune ligne à afficher", "loadingOoo": "Chargement…",
+    "page": "Page", "of": "sur", "to": "à", "more": "plus",
+}
+
+# Formatage des dates : jj/mm/aaaa hh:mm
+_JS_FORMAT_DATE = JsCode("""
+function(p) {
+    if (!p.value) return '';
+    const d = new Date(p.value);
+    if (isNaN(d)) return p.value;
+    const z = n => String(n).padStart(2, '0');
+    return z(d.getDate()) + '/' + z(d.getMonth() + 1) + '/' + d.getFullYear()
+         + ' ' + z(d.getHours()) + ':' + z(d.getMinutes());
+}""")
+
+# Filtre de date : compare uniquement le jour (sans l'heure)
+_JS_COMPARATEUR_DATE = JsCode("""
+function(filtre, valeur) {
+    if (!valeur) return -1;
+    const d = new Date(valeur);
+    const jour = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    if (jour < filtre) return -1;
+    if (jour > filtre) return 1;
+    return 0;
+}""")
+
+# Couleur de fond de ligne (colonne cachée "_couleur")
+_JS_STYLE_LIGNE = JsCode("""
+function(p) {
+    if (p.data && p.data._couleur) return { background: p.data._couleur };
+    return null;
+}""")
 
 
-def filtrer_tableau(df: pd.DataFrame, key: str) -> pd.DataFrame:
-    """Affiche un panneau de filtres au-dessus d'un tableau et renvoie les lignes retenues.
+def _js_format_nombre(decimales: int, suffixe: str = "") -> JsCode:
+    return JsCode(f"""
+function(p) {{
+    if (p.value === null || p.value === undefined || isNaN(p.value)) return '–';
+    return Number(p.value).toFixed({decimales}) + '{suffixe}';
+}}""")
 
-    Le widget s'adapte au type de chaque colonne choisie :
-      - date/heure        -> plage de dates
-      - nombre (durées…)  -> curseur min / max
-      - texte peu varié   -> liste de valeurs à cocher
-      - texte très varié, identifiants -> recherche "contient"
-    L'index du DataFrame est conservé (utile pour la mise en couleur des lignes).
+
+def afficher_tableau(df: pd.DataFrame, key: str, style_ligne=None, hauteur_max: int = 450) -> None:
+    """Affiche un tableau triable et filtrable depuis les en-têtes de colonnes.
+
+    - Texte / identifiants : filtre « contient », « commence par »…
+    - Nombres (durées, écarts) : filtre « supérieur à », « entre »…
+    - Dates : filtre « avant », « après », « entre »…
+    `style_ligne` : fonction (row -> liste de styles CSS) reprise des anciennes
+    mises en couleur ; seule la couleur de fond est conservée.
     """
-    if df.empty:
-        return df
+    df = df.copy()
 
-    masque = pd.Series(True, index=df.index)
-    with st.expander("🔎 Filtrer ce tableau", expanded=False):
-        colonnes = st.multiselect(
-            "Colonnes à filtrer",
-            options=list(df.columns),
-            key=f"{key}__colonnes",
-            placeholder="Choisissez une ou plusieurs colonnes",
+    if style_ligne is not None:
+        df["_couleur"] = df.apply(
+            lambda r: (style_ligne(r) or [""])[0].replace("background-color:", "").strip() or None,
+            axis=1,
         )
-        for col in colonnes:
-            serie = df[col]
-            k = f"{key}__{col}"
 
-            if pd.api.types.is_datetime64_any_dtype(serie):
-                jours = serie.dt.date
-                d_min, d_max = jours.min(), jours.max()
-                if pd.isna(d_min):
-                    st.caption(f"« {col} » : aucune date à filtrer.")
-                    continue
-                plage = st.date_input(
-                    f"{col} — période", value=(d_min, d_max),
-                    min_value=d_min, max_value=d_max, key=k, format="DD/MM/YYYY",
-                )
-                if isinstance(plage, (tuple, list)) and len(plage) == 2:
-                    masque &= jours.between(plage[0], plage[1])
+    gb = GridOptionsBuilder.from_dataframe(df)
+    gb.configure_default_column(
+        sortable=True, resizable=True, filter=True,
+        floatingFilter=LIGNE_DE_FILTRES, suppressHeaderMenuButton=False,
+        minWidth=90,
+    )
 
-            elif pd.api.types.is_numeric_dtype(serie) and not _COLONNES_IDENTIFIANTS.search(col):
-                v_min, v_max = serie.min(), serie.max()
-                if pd.isna(v_min) or v_min == v_max:
-                    st.caption(f"« {col} » : une seule valeur, rien à filtrer.")
-                    continue
-                v_min, v_max = float(np.floor(v_min)), float(np.ceil(v_max))
-                bas, haut = st.slider(f"{col} — entre", v_min, v_max, (v_min, v_max), key=k)
-                if (bas, haut) != (v_min, v_max):  # les cases vides ne restent que sans filtre actif
-                    masque &= serie.between(bas, haut)
-
+    for col in df.columns:
+        serie = df[col]
+        if col == "_couleur":
+            gb.configure_column(col, hide=True, filter=False)
+        elif pd.api.types.is_datetime64_any_dtype(serie):
+            df[col] = serie.dt.strftime("%Y-%m-%dT%H:%M:%S").where(serie.notna(), None)
+            gb.configure_column(
+                col, filter="agDateColumnFilter", valueFormatter=_JS_FORMAT_DATE,
+                filterParams={"comparator": _JS_COMPARATEUR_DATE, "inRangeInclusive": True,
+                              "buttons": ["reset"]},
+            )
+        elif pd.api.types.is_numeric_dtype(serie) and _COLONNES_IDENTIFIANTS.search(col):
+            # Numéros de dossier / devis : recherche texte, tri numérique conservé
+            nom_js = json.dumps(col)
+            gb.configure_column(
+                col, filter="agTextColumnFilter",
+                filterValueGetter=JsCode(
+                    f"function(p) {{ const v = p.data[{nom_js}]; return v == null ? null : String(v); }}"
+                ),
+                filterParams={"buttons": ["reset"]},
+            )
+        elif pd.api.types.is_numeric_dtype(serie) and col != "id":
+            if "%" in col:
+                fmt = _js_format_nombre(0, "%")
             else:
-                texte = serie.astype("string").fillna("(vide)")
-                valeurs = sorted(texte.unique().tolist())
-                if len(valeurs) <= _MAX_VALEURS_LISTE and not _COLONNES_IDENTIFIANTS.search(col):
-                    choix = st.multiselect(f"{col} — valeurs", valeurs, key=k,
-                                           placeholder="Toutes")
-                    if choix:
-                        masque &= texte.isin(choix)
-                else:
-                    recherche = st.text_input(f"{col} — contient", key=k,
-                                              placeholder="Texte à rechercher (plusieurs termes séparés par des virgules)")
-                    termes = [t.strip() for t in recherche.split(",") if t.strip()]
-                    if termes:
-                        masque &= texte.str.contains("|".join(map(re.escape, termes)), case=False, regex=True)
+                fmt = _js_format_nombre(2)
+            gb.configure_column(
+                col, type=["numericColumn"], filter="agNumberColumnFilter",
+                valueFormatter=fmt, filterParams={"buttons": ["reset"]},
+            )
+        elif pd.api.types.is_numeric_dtype(serie):
+            gb.configure_column(col, filter="agNumberColumnFilter", filterParams={"buttons": ["reset"]})
+        else:
+            df[col] = serie.astype("string").where(serie.notna(), None)
+            gb.configure_column(col, filter="agTextColumnFilter", filterParams={"buttons": ["reset"]})
 
-    resultat = df[masque]
-    if len(resultat) != len(df):
-        st.caption(f"Filtre actif : {len(resultat)} ligne(s) affichée(s) sur {len(df)}.")
-    return resultat
+    gb.configure_grid_options(
+        localeText=_TRADUCTION_AGGRID,
+        getRowStyle=_JS_STYLE_LIGNE,
+        autoSizeStrategy={"type": "fitGridWidth", "defaultMinWidth": 90},
+        enableCellTextSelection=True,
+        animateRows=False,
+    )
+
+    entete = 2 * 42 if LIGNE_DE_FILTRES else 42
+    hauteur = min(hauteur_max, entete + 30 * max(len(df), 1) + 12)
+
+    AgGrid(
+        df,
+        gridOptions=gb.build(),
+        height=hauteur,
+        theme="streamlit",
+        allow_unsafe_jscode=True,
+        update_on=[],               # filtrer / trier ne relance pas le script
+        show_toolbar=False,
+        show_search=False,
+        show_download_button=False,
+        key=key,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -565,8 +649,7 @@ with tab_hebdo:
             ["id", "created_at", "operateur", "operation", "ordre_fabrication", "heure_debut", "heure_fin", "Durée h"]
         ].sort_values("heure_debut", ascending=False).reset_index(drop=True)
         table_pointages["Durée h"] = table_pointages["Durée h"].round(2)
-        table_pointages = filtrer_tableau(table_pointages, key="filtre_pointages_hebdo")
-        st.dataframe(table_pointages, use_container_width=True, hide_index=True)
+        afficher_tableau(table_pointages, key="grille_pointages_hebdo")
     else:
         st.info("Aucun pointage sur cette semaine.")
 
@@ -730,20 +813,7 @@ with tab_hebdo:
                     color = "background-color: #d4edda"  # Vert : dans la tolérance
                 return [color] * len(row)
 
-            table_of = filtrer_tableau(table_of, key="filtre_of_hebdo")
-            styled_table_of = (
-                table_of.style.apply(highlight_row, axis=1)
-                .format(
-                    {
-                        "temps_devis (h)": "{:.2f}",
-                        "temps_operateurs (h)": "{:.2f}",
-                        "delta (h)": "{:.2f}",
-                        "ratio (opérateurs-devis)/devis (%)": "{:.0f}%",
-                    },
-                    na_rep="–",
-                )
-            )
-            st.dataframe(styled_table_of, use_container_width=True, hide_index=True)
+            afficher_tableau(table_of, key="grille_table_of", style_ligne=highlight_row)
             st.caption(
                 "⬜ Opération non pointée (0h) · "
                 "🟥 Écart trop positif (dépassement d'heures) · "
@@ -873,20 +943,7 @@ with tab_hebdo:
                     color = "background-color: #d4edda"  # Vert : dans la tolérance
                 return [color] * len(row)
 
-            table_spec_of = filtrer_tableau(table_spec_of, key="filtre_spec_hebdo")
-            styled_table_spec_of = (
-                table_spec_of.style.apply(highlight_row_spec, axis=1)
-                .format(
-                    {
-                        "temps_devis (h)": "{:.2f}",
-                        "temps_operateurs (h)": "{:.2f}",
-                        "delta (h)": "{:.2f}",
-                        "ratio (opérateurs-devis)/devis (%)": "{:.0f}%",
-                    },
-                    na_rep="–",
-                )
-            )
-            st.dataframe(styled_table_spec_of, use_container_width=True, hide_index=True)
+            afficher_tableau(table_spec_of, key="grille_table_spec_of", style_ligne=highlight_row_spec)
             st.caption(
                 "⬜ Opération non pointée (0h) · "
                 "🟥 Écart trop positif (dépassement d'heures) · "
@@ -1012,8 +1069,7 @@ with tab_mensuel:
             ["id", "created_at", "operateur", "operation", "ordre_fabrication", "heure_debut", "heure_fin", "Durée h"]
         ].sort_values("heure_debut", ascending=False).reset_index(drop=True)
         table_pointages_m["Durée h"] = table_pointages_m["Durée h"].round(2)
-        table_pointages_m = filtrer_tableau(table_pointages_m, key="filtre_pointages_mensuel")
-        st.dataframe(table_pointages_m, use_container_width=True, hide_index=True, key="df_pointages_mensuel")
+        afficher_tableau(table_pointages_m, key="grille_pointages_mensuel")
     else:
         st.info("Aucun pointage sur ce mois.")
 
@@ -1169,20 +1225,7 @@ with tab_mensuel:
                     color = "background-color: #d4edda"  # Vert : dans la tolérance
                 return [color] * len(row)
 
-            table_of_m = filtrer_tableau(table_of_m, key="filtre_of_mensuel")
-            styled_table_of_m = (
-                table_of_m.style.apply(highlight_row_mensuel, axis=1)
-                .format(
-                    {
-                        "temps_devis (h)": "{:.2f}",
-                        "temps_operateurs (h)": "{:.2f}",
-                        "delta (h)": "{:.2f}",
-                        "ratio (opérateurs-devis)/devis (%)": "{:.0f}%",
-                    },
-                    na_rep="–",
-                )
-            )
-            st.dataframe(styled_table_of_m, use_container_width=True, hide_index=True, key="df_of_mensuel")
+            afficher_tableau(table_of_m, key="grille_table_of_m", style_ligne=highlight_row_mensuel)
             st.caption(
                 "⬜ Opération non pointée (0h) · "
                 "🟥 Écart trop positif (dépassement d'heures) · "
@@ -1313,20 +1356,7 @@ with tab_mensuel:
                     color = "background-color: #d4edda"  # Vert : dans la tolérance
                 return [color] * len(row)
 
-            table_spec_of_m = filtrer_tableau(table_spec_of_m, key="filtre_spec_mensuel")
-            styled_table_spec_of_m = (
-                table_spec_of_m.style.apply(highlight_row_spec_mensuel, axis=1)
-                .format(
-                    {
-                        "temps_devis (h)": "{:.2f}",
-                        "temps_operateurs (h)": "{:.2f}",
-                        "delta (h)": "{:.2f}",
-                        "ratio (opérateurs-devis)/devis (%)": "{:.0f}%",
-                    },
-                    na_rep="–",
-                )
-            )
-            st.dataframe(styled_table_spec_of_m, use_container_width=True, hide_index=True, key="df_spec_mensuel")
+            afficher_tableau(table_spec_of_m, key="grille_table_spec_of_m", style_ligne=highlight_row_spec_mensuel)
             st.caption(
                 "⬜ Opération non pointée (0h) · "
                 "🟥 Écart trop positif (dépassement d'heures) · "
