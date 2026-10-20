@@ -15,20 +15,25 @@ Settings > Secrets (Streamlit Community Cloud) :
   SUPABASE_KEY = "..."
 """
 
+import base64
 import json
 import re
 from datetime import date, timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+import plotly.io as pio
 import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from supabase import create_client
 
+_FAVICON = Path(__file__).parent / "assets" / "favicon_lbfi.png"
 st.set_page_config(
-    page_title="Suivi d'activité",
-    page_icon="📊",
+    page_title="LBFI — Suivi des temps de production",
+    page_icon=str(_FAVICON) if _FAVICON.exists() else "🏭",
     layout="wide",
 )
 
@@ -49,12 +54,24 @@ DUREE_CACHE_S = 600  # les données sont relues dans Supabase au plus toutes les
 # ---------------------------------------------------------------------------
 # Palette de couleurs commune à tous les graphiques "devisé vs réalisé"
 # ---------------------------------------------------------------------------
-COULEUR_REALISE = "#0068C9"  # bleu foncé
-COULEUR_DEVISE = "#83C9FF"   # bleu clair
+COULEUR_REALISE = "#94C000"  # vert LBFI
+COULEUR_DEVISE = "#BDBDB8"   # gris clair
 COLOR_MAP_DEVIS_REALISE = {
     "Temps réalisé": COULEUR_REALISE,
     "Temps devisé": COULEUR_DEVISE,
 }
+
+# Style par défaut de tous les graphiques : fond blanc + palette harmonisée au logo
+PALETTE_LBFI = [
+    "#94C000", "#575756", "#2E86AB", "#F4A259", "#8E6C8A",
+    "#5BC0BE", "#E4572E", "#B8B8B3", "#3D5A80", "#C9A227",
+]
+_modele = go.layout.Template(pio.templates["plotly_white"])
+_modele.layout.colorway = PALETTE_LBFI          # utilisé aussi par les camemberts
+_modele.layout.font = dict(family="Source Sans Pro, sans-serif", color="#2B2B2A")
+pio.templates["lbfi"] = _modele
+px.defaults.template = "lbfi"
+px.defaults.color_discrete_sequence = PALETTE_LBFI
 
 # ---------------------------------------------------------------------------
 # Chargement des données
@@ -697,15 +714,23 @@ def fenetre_detail_pointages(numero_dossier: str, operation: str, devis_h: float
     )
 
 
-def bouton_detail_pointages(ligne: dict | None, numero_dossier: str, key: str) -> None:
-    """Bouton sous le tableau des opérations : ouvre le détail de la ligne sélectionnée."""
+def bouton_detail_pointages(ligne: dict | None, numero_dossier: str | None, key: str) -> None:
+    """Bouton sous un tableau d'opérations : ouvre le détail de la ligne sélectionnée.
+
+    `numero_dossier=None` : le numéro est lu dans la colonne "numero_dossier" de la ligne.
+    """
     if ligne is None:
         st.button("🔎 Voir le détail des pointages", key=key, disabled=True,
                   help="Cliquez d'abord sur une ligne du tableau.")
         st.caption("Cliquez sur une ligne du tableau pour pouvoir afficher le détail de ses pointages.")
         return
     operation = ligne.get("operation")
-    if st.button(f"🔎 Voir le détail des pointages — {operation}", key=key, type="primary"):
+    if numero_dossier is None:
+        numero_dossier = ligne.get("numero_dossier")
+        libelle = f"dossier {numero_dossier} · {operation}"
+    else:
+        libelle = str(operation)
+    if st.button(f"🔎 Voir le détail des pointages — {libelle}", key=key, type="primary"):
         fenetre_detail_pointages(
             str(numero_dossier), str(operation),
             pd.to_numeric(ligne.get("temps_devis (h)"), errors="coerce"),
@@ -717,7 +742,109 @@ def bouton_detail_pointages(ligne: dict | None, numero_dossier: str, key: str) -
 # Interface — chargement des données
 # ---------------------------------------------------------------------------
 
-st.title("📊 Suivi d'activité")
+# ---------------------------------------------------------------------------
+# Identité visuelle LBFI (logo, bandeaux photo, couleurs)
+# ---------------------------------------------------------------------------
+DOSSIER_ASSETS = Path(__file__).parent / "assets"
+VERT_LBFI = "#94C000"        # vert du logo
+VERT_LBFI_FONCE = "#5E7C00"  # vert lisible pour du texte / boutons
+GRAPHITE_LBFI = "#575756"    # gris du logo
+
+
+@st.cache_data(show_spinner=False)
+def _image_base64(nom: str) -> str | None:
+    chemin = DOSSIER_ASSETS / nom
+    if not chemin.exists():
+        return None
+    mime = "image/png" if chemin.suffix.lower() == ".png" else "image/jpeg"
+    return f"data:{mime};base64," + base64.b64encode(chemin.read_bytes()).decode()
+
+
+def injecter_style() -> None:
+    st.markdown(f"""
+<style>
+  /* Bandeaux photo */
+  .lbfi-hero, .lbfi-bandeau {{
+    position: relative; border-radius: 14px; overflow: hidden;
+    background-size: cover; background-position: center; color: #fff;
+  }}
+  .lbfi-hero {{ min-height: 190px; padding: 26px 32px; display: flex; align-items: flex-end;
+               justify-content: space-between; gap: 24px; margin-bottom: 8px; }}
+  .lbfi-hero::before, .lbfi-bandeau::before {{
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(100deg, rgba(25,27,24,.86) 0%, rgba(25,27,24,.55) 55%, rgba(25,27,24,.15) 100%);
+  }}
+  .lbfi-hero > *, .lbfi-bandeau > * {{ position: relative; }}
+  .lbfi-hero h1 {{ color: #fff; font-size: 2.1rem; line-height: 1.15; margin: 0; padding: 0; font-weight: 700; }}
+  .lbfi-hero p {{ color: rgba(255,255,255,.82); margin: 6px 0 0 0; font-size: 1rem; }}
+  .lbfi-hero .lbfi-trait {{ width: 56px; height: 4px; background: {VERT_LBFI}; border-radius: 2px; margin-bottom: 12px; }}
+  .lbfi-hero .lbfi-logo {{ background: #fff; border-radius: 10px; padding: 8px 12px; flex-shrink: 0; }}
+  .lbfi-hero .lbfi-logo img {{ height: 46px; display: block; }}
+  .lbfi-bandeau {{ min-height: 92px; padding: 18px 26px; margin: 4px 0 18px 0; display: flex;
+                   flex-direction: column; justify-content: center; }}
+  .lbfi-bandeau h2 {{ color: #fff; margin: 0; padding: 0; font-size: 1.45rem; font-weight: 650; }}
+  .lbfi-bandeau p {{ color: rgba(255,255,255,.82); margin: 4px 0 0 0; font-size: .92rem; }}
+  .lbfi-bandeau h2::before {{ content: ""; display: inline-block; width: 6px; height: 1.05em;
+                              background: {VERT_LBFI}; border-radius: 2px; margin-right: 10px; vertical-align: -2px; }}
+  @media (max-width: 700px) {{
+    .lbfi-hero {{ flex-direction: column-reverse; align-items: flex-start; padding: 20px; }}
+    .lbfi-hero h1 {{ font-size: 1.6rem; }}
+  }}
+
+  /* Indicateurs en cartes */
+  [data-testid="stMetric"] {{
+    background: #fff; border: 1px solid #E4E5E0; border-left: 4px solid {VERT_LBFI};
+    border-radius: 10px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,.04);
+  }}
+  [data-testid="stMetricLabel"] p {{ color: {GRAPHITE_LBFI}; font-weight: 600; }}
+
+  /* Onglets */
+  .stTabs [data-baseweb="tab-list"] {{ gap: 6px; border-bottom: 1px solid #E4E5E0; }}
+  .stTabs [data-baseweb="tab"] {{ padding: 10px 16px; border-radius: 8px 8px 0 0; font-weight: 600; }}
+  .stTabs [aria-selected="true"] {{ background: #F1F6E0; color: {VERT_LBFI_FONCE}; }}
+  .stTabs [data-baseweb="tab-highlight"] {{ background-color: {VERT_LBFI}; }}
+
+  /* Titres de section */
+  h3 {{ color: #2B2B2A; }}
+  [data-testid="stSidebar"] h2 {{ font-size: 1.05rem; color: {GRAPHITE_LBFI}; }}
+  .block-container {{ padding-top: 2.2rem; }}
+</style>
+""", unsafe_allow_html=True)
+
+
+def en_tete_lbfi() -> None:
+    fond = _image_base64("bandeau_presses.jpg")
+    logo = _image_base64("logo_lbfi.png")
+    style_fond = f"background-image: url('{fond}');" if fond else f"background: {GRAPHITE_LBFI};"
+    logo_html = f'<div class="lbfi-logo"><img src="{logo}" alt="LBFI International"></div>' if logo else ""
+    st.markdown(f"""
+<div class="lbfi-hero" style="{style_fond}">
+  <div>
+    <div class="lbfi-trait"></div>
+    <h1>Suivi des temps de production</h1>
+    <p>Usine LBFI — pointages des opérateurs et ordres de fabrication</p>
+  </div>
+  {logo_html}
+</div>""", unsafe_allow_html=True)
+
+
+def bandeau(image: str, titre: str, sous_titre: str = "") -> None:
+    fond = _image_base64(image)
+    style_fond = f"background-image: url('{fond}');" if fond else f"background: {GRAPHITE_LBFI};"
+    st.markdown(f"""
+<div class="lbfi-bandeau" style="{style_fond}">
+  <h2>{titre}</h2>{f'<p>{sous_titre}</p>' if sous_titre else ''}
+</div>""", unsafe_allow_html=True)
+
+
+injecter_style()
+_logo = DOSSIER_ASSETS / "logo_lbfi.png"
+if _logo.exists():
+    try:
+        st.logo(str(_logo), size="large")
+    except TypeError:  # anciennes versions de Streamlit
+        st.logo(str(_logo))
+en_tete_lbfi()
 
 with st.sidebar:
     st.header("📁 Données")
@@ -741,6 +868,7 @@ tab_jour, tab_hebdo, tab_mensuel, tab_annuel = st.tabs(
 )
 
 with tab_jour:
+    bandeau("bandeau_jour.jpg", "Suivi journalier", "Qui a pointé quoi, et quand, sur une journée")
 
     # ---------------------------------------------------------------------------
     # Sélecteur de jour
@@ -960,6 +1088,8 @@ with tab_jour:
 
 
 with tab_hebdo:
+    bandeau("bandeau_semaine.jpg", "Suivi hebdomadaire",
+            "Heures pointées et ordres de fabrication clôturés dans la semaine")
 
     # ---------------------------------------------------------------------------
     # Sélecteur de semaine
@@ -1229,7 +1359,9 @@ with tab_hebdo:
                     color = "background-color: #d4edda"  # Vert : dans la tolérance
                 return [color] * len(row)
 
-            afficher_tableau(table_of, key="grille_table_of", style_ligne=highlight_row)
+            ligne_of = afficher_tableau(table_of, key="grille_table_of",
+                                        style_ligne=highlight_row, selection=True)
+            bouton_detail_pointages(ligne_of, None, key="btn_detail_of_hebdo")
             st.caption(
                 "⬜ Opération non pointée (0h) · "
                 "🟥 Écart trop positif (dépassement d'heures) · "
@@ -1377,6 +1509,8 @@ with tab_hebdo:
 # ---------------------------------------------------------------------------
 
 with tab_mensuel:
+    bandeau("bandeau_mois.jpg", "Suivi mensuel",
+            "Heures pointées et ordres de fabrication clôturés dans le mois")
 
     # ---------------------------------------------------------------------------
     # Sélecteur de mois
@@ -1643,7 +1777,9 @@ with tab_mensuel:
                     color = "background-color: #d4edda"  # Vert : dans la tolérance
                 return [color] * len(row)
 
-            afficher_tableau(table_of_m, key="grille_table_of_m", style_ligne=highlight_row_mensuel)
+            ligne_of_m = afficher_tableau(table_of_m, key="grille_table_of_m",
+                                          style_ligne=highlight_row_mensuel, selection=True)
+            bouton_detail_pointages(ligne_of_m, None, key="btn_detail_of_mensuel")
             st.caption(
                 "⬜ Opération non pointée (0h) · "
                 "🟥 Écart trop positif (dépassement d'heures) · "
@@ -1792,6 +1928,7 @@ with tab_mensuel:
 # ---------------------------------------------------------------------------
 
 with tab_annuel:
+    bandeau("bandeau_annee.jpg", "Bilan annuel", "Devisé, réalisé et évolution sur l'année")
     st.header("📅 Bilan annuel")
 
     # -- Sélecteur d'année -------------------------------------------------
