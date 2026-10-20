@@ -1,0 +1,7 @@
+# Thème du tableau de bord LBFI (à placer à côté de secrets.toml, sans l'écraser)
+[theme]
+base = "light"
+primaryColor = "#5E7C00"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F5F1"
+textColor = "#2B2B2A"
