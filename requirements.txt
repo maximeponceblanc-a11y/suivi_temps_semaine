@@ -3,3 +3,4 @@ pandas>=2.0
 numpy
 plotly
 supabase
+streamlit-aggrid
