@@ -69,9 +69,44 @@ PALETTE_LBFI = [
 _modele = go.layout.Template(pio.templates["plotly_white"])
 _modele.layout.colorway = PALETTE_LBFI          # utilisé aussi par les camemberts
 _modele.layout.font = dict(family="Source Sans Pro, sans-serif", color="#2B2B2A")
+_modele.layout.separators = ", "                # format français : virgule décimale, espace des milliers
 pio.templates["lbfi"] = _modele
 px.defaults.template = "lbfi"
 px.defaults.color_discrete_sequence = PALETTE_LBFI
+
+# Graphiques sans la barre d'outils Plotly (zoom, capture…) qui encombre au survol
+PLOTLY_CONFIG = {"displayModeBar": False, "displaylogo": False}
+
+# ---------------------------------------------------------------------------
+# Formatage des nombres (format français)
+# ---------------------------------------------------------------------------
+_ESPACE_FINE = " "  # espace fine insécable (séparateur de milliers)
+
+
+def fr_nombre(valeur, decimales: int = 1) -> str:
+    """12066.34 -> "12 066,3" ; NaN -> "–"."""
+    if valeur is None or pd.isna(valeur):
+        return "–"
+    texte = f"{valeur:,.{decimales}f}"
+    return texte.replace(",", _ESPACE_FINE).replace(".", ",")
+
+
+def fr_heures(valeur, decimales: int = 1) -> str:
+    """Heures au format français ; au-delà de 1 000 h, sans décimale pour rester lisible."""
+    if valeur is not None and pd.notna(valeur) and abs(valeur) >= 1000:
+        decimales = 0
+    texte = fr_nombre(valeur, decimales)
+    return texte if texte == "–" else f"{texte} h"
+
+
+def fr_pct(ratio, decimales: int = 0, signe: bool = False) -> str:
+    """0.113 -> "11 %" (signe=True -> "+11 %")."""
+    if ratio is None or pd.isna(ratio):
+        return "–"
+    texte = fr_nombre(ratio * 100, decimales)
+    if signe and ratio > 0:
+        texte = "+" + texte
+    return f"{texte}{_ESPACE_FINE}%"
 
 # ---------------------------------------------------------------------------
 # Chargement des données
@@ -275,6 +310,50 @@ def nb_jours_ouvres(premier_jour: date, dernier_jour: date) -> int:
 TAUX_HORAIRE_JOUR = 7.8  # heures théoriques par opérateur et par jour ouvré travaillé
 
 
+def maintenant_local() -> pd.Timestamp:
+    """Date et heure actuelles à Paris, sans fuseau (comme les heures de pointage)."""
+    return pd.Timestamp.now(tz=FUSEAU_HORAIRE).tz_localize(None)
+
+
+def fraction_journee_ecoulee(instant: pd.Timestamp) -> float:
+    """Part (0 à 1) des horaires d'ouverture du jour déjà écoulée à `instant`.
+
+    Lundi–vendredi 5h00–16h30 : à 8h45, 3,75 h sur 11,5 h -> 0,33. Hors jours
+    ouvrés (samedi, dimanche), renvoie 0 : ces jours ne comptent pas dans le
+    temps théorique.
+    """
+    if instant.weekday() > 4:
+        return 0.0
+    ouverture, fermeture = HORAIRES_ATELIER[instant.weekday()]
+    heure = instant.hour + instant.minute / 60
+    return float(min(max((heure - ouverture) / (fermeture - ouverture), 0.0), 1.0))
+
+
+def jours_ouvres_theoriques(premier_jour: date, dernier_jour: date,
+                            instant: pd.Timestamp | None = None) -> float:
+    """Jours ouvrés (lun.–ven.) entre deux dates incluses, limités à ce qui est écoulé.
+
+    Pour une période passée, identique à nb_jours_ouvres. Pour la période en cours,
+    les jours à venir ne comptent pas et le jour courant compte au prorata des
+    horaires d'ouverture déjà écoulés : mardi à 8h45, une semaine vaut 1 + 0,33 jour
+    (et non 5). C'est ce qui évite d'afficher un taux d'attribution de 11 % un
+    mardi matin.
+    """
+    instant = maintenant_local() if instant is None else instant
+    aujourdhui = instant.date()
+    if premier_jour > dernier_jour or premier_jour > aujourdhui:
+        return 0.0
+    if dernier_jour < aujourdhui:
+        return float(nb_jours_ouvres(premier_jour, dernier_jour))
+    jours_passes = nb_jours_ouvres(premier_jour, aujourdhui - timedelta(days=1)) if premier_jour < aujourdhui else 0
+    return jours_passes + fraction_journee_ecoulee(instant)
+
+
+def periode_en_cours(premier_jour: date, dernier_jour: date) -> bool:
+    """True si la période contient la date du jour."""
+    return premier_jour <= maintenant_local().date() <= dernier_jour
+
+
 def temps_theorique_semaine(pointages_semaine: pd.DataFrame, monday: date, sunday: date,
                              taux_horaire: float = TAUX_HORAIRE_JOUR) -> float:
     """Temps travaillé théorique d'une semaine ISO complète.
@@ -293,9 +372,12 @@ def temps_theorique_semaine(pointages_semaine: pd.DataFrame, monday: date, sunda
     Limite assumée : surestime le temps théorique des opérateurs réellement à temps
     partiel ou n'ayant travaillé qu'une partie de la semaine (congé, arrêt, entrée/
     sortie en cours de semaine).
+
+    Semaine en cours : seuls les jours ouvrés déjà écoulés comptent (voir
+    jours_ouvres_theoriques).
     """
     nb_operateurs = pointages_semaine["id_operateur"].nunique()
-    jours_ouvres_semaine = nb_jours_ouvres(monday, sunday)
+    jours_ouvres_semaine = jours_ouvres_theoriques(monday, sunday)
     return nb_operateurs * jours_ouvres_semaine * taux_horaire
 
 
@@ -323,7 +405,7 @@ def temps_theorique_mois_via_semaines(df_pointages: pd.DataFrame, premier_jour: 
         debut_intersection = max(lundi, premier_jour)
         fin_intersection = min(dimanche, dernier_jour)
         jours_ouvres_dans_mois = (
-            nb_jours_ouvres(debut_intersection, fin_intersection) if debut_intersection <= fin_intersection else 0
+            jours_ouvres_theoriques(debut_intersection, fin_intersection)
         )
 
         total += nb_operateurs_semaine * jours_ouvres_dans_mois * taux_horaire
@@ -362,8 +444,10 @@ def build_month_options(df_pointages: pd.DataFrame, df_of: pd.DataFrame) -> pd.D
 
     labels = []
     for _, row in months.iterrows():
+        premier, dernier = month_bounds(row["cal_year"], row["cal_month"])
         labels.append(
             f"{NOMS_MOIS[int(row['cal_month']) - 1]} {int(row['cal_year'])}"
+            + (" · en cours" if periode_en_cours(premier, dernier) else "")
         )
     months = months.copy()
     months["label"] = labels
@@ -383,10 +467,45 @@ def build_week_options(df_pointages: pd.DataFrame, df_of: pd.DataFrame) -> pd.Da
         labels.append(
             f"Semaine {int(row['iso_week']):02d} — {int(row['iso_year'])} "
             f"({monday.strftime('%d/%m/%Y')} au {sunday.strftime('%d/%m/%Y')})"
+            + (" · en cours" if periode_en_cours(monday, sunday) else "")
         )
     weeks = weeks.copy()
     weeks["label"] = labels
     return weeks.reset_index(drop=True)
+
+
+COULEUR_EN_COURS = "#D6E7A3"  # vert pâle : période en cours (incomplète)
+
+
+def marquer_periode_en_cours_barres(fig: go.Figure, donnees: pd.DataFrame, col_x: str) -> None:
+    """Barre de la période en cours en vert pâle, avec la mention « en cours »."""
+    fig.update_traces(marker_color=[COULEUR_EN_COURS if ec else COULEUR_REALISE for ec in donnees["en_cours"]])
+    for x in donnees.loc[donnees["en_cours"], col_x]:
+        fig.add_annotation(x=x, y=1, yref="paper", text="en cours", showarrow=False,
+                           font=dict(size=10, color=GRAPHITE_LBFI))
+
+
+def courbe_taux_avec_periode_en_cours(donnees: pd.DataFrame, col_x: str) -> go.Figure:
+    """Courbe du taux d'attribution des périodes terminées ; la période en cours,
+    incomplète, est un point creux à part, non relié à la courbe."""
+    terminees = donnees.loc[~donnees["en_cours"]]
+    en_cours = donnees.loc[donnees["en_cours"]]
+    fig = px.line(
+        terminees, x=col_x, y="taux_attribution", markers=True,
+        labels={col_x: "", "taux_attribution": "Taux d'attribution"},
+        category_orders={col_x: donnees[col_x].tolist()},
+    )
+    if not en_cours.empty:
+        fig.add_scatter(
+            x=en_cours[col_x], y=en_cours["taux_attribution"], mode="markers+text",
+            marker=dict(symbol="circle-open", size=10, color=COULEUR_REALISE, line=dict(width=2)),
+            text=["en cours"] * len(en_cours), textposition="top center",
+            textfont=dict(size=10, color=GRAPHITE_LBFI), showlegend=False,
+            hovertemplate="%{x} (en cours) : %{y:.0%}<extra></extra>",
+        )
+    fig.update_xaxes(categoryorder="array", categoryarray=donnees[col_x].tolist())
+    fig.update_yaxes(tickformat=".0%")
+    return fig
 
 
 def pie_top_n(df: pd.DataFrame, group_col: str, value_col: str, n: int = 12):
@@ -450,15 +569,10 @@ def marquer_pointages_suspects(df: pd.DataFrame, aujourdhui: pd.Timestamp) -> pd
     regles.append((fin_eff.isna() & (jour_debut < aujourdhui),
                    "Non clôturé depuis un jour précédent"))
 
-    # 3. Chevauchement avec un autre pointage du même opérateur
-    ordre = df.loc[debut.notna() & df["id_operateur"].notna()].sort_values(["id_operateur", "heure_debut"])
-    groupe = ordre["id_operateur"]
-    fin_ordre = fin_eff.loc[ordre.index]
-    fin_max_precedents = fin_ordre.groupby(groupe).shift().groupby(groupe).cummax()
-    debut_suivant = ordre["heure_debut"].groupby(groupe).shift(-1)
-    chevauche = (ordre["heure_debut"] < fin_max_precedents) | (debut_suivant < fin_ordre)
-    regles.append((chevauche.reindex(df.index, fill_value=False),
-                   "Chevauche un autre pointage de l'opérateur"))
+    # 3. Chevauchement avec un autre pointage du même opérateur : on nomme le ou
+    # les pointages en conflit pour que l'utilisateur puisse vérifier.
+    texte_chevauche = _textes_chevauchements(df, fin_eff)
+    regles.append((texte_chevauche != "", texte_chevauche))
 
     # 4. En dehors des horaires d'ouverture de l'atelier
     jour_semaine = debut.dt.weekday
@@ -476,8 +590,47 @@ def marquer_pointages_suspects(df: pd.DataFrame, aujourdhui: pd.Timestamp) -> pd
     motifs = pd.Series("", index=df.index, dtype=object)
     for masque, texte in regles:
         m = masque.fillna(False).astype(bool)
+        if isinstance(texte, pd.Series):  # texte propre à chaque pointage
+            texte = texte[m]
         motifs[m] = np.where(motifs[m] == "", texte, motifs[m] + " · " + texte)
     return motifs
+
+
+MOTIF_CHEVAUCHEMENT = "Chevauche"  # début commun des motifs de chevauchement
+
+
+def _textes_chevauchements(df: pd.DataFrame, fin_eff: pd.Series) -> pd.Series:
+    """Pour chaque pointage, "Chevauche n°7529 (09:00–10:30)" ou "" s'il n'y a pas de conflit.
+
+    Balayage chronologique par opérateur : on garde les pointages encore « ouverts »
+    (fin > début du pointage examiné) ; chacun d'eux est en conflit avec lui.
+    """
+    partenaires: dict = {i: [] for i in df.index}
+    valides = df["heure_debut"].notna() & df["id_operateur"].notna()
+    donnees = df.loc[valides, ["id_operateur", "heure_debut"]].assign(_fin=fin_eff[valides])
+    for _, groupe in donnees.sort_values("heure_debut").groupby("id_operateur", sort=False):
+        actifs = []  # (fin, index)
+        for idx, debut, fin in zip(groupe.index, groupe["heure_debut"], groupe["_fin"]):
+            actifs = [(f, j) for f, j in actifs if f > debut]
+            for _, j in actifs:
+                partenaires[idx].append(j)
+                partenaires[j].append(idx)
+            if pd.notna(fin):
+                actifs.append((fin, idx))
+
+    def libelle(j, jour_ref) -> str:
+        debut, fin = df.at[j, "heure_debut"], fin_eff.at[j]
+        fmt = "%H:%M" if debut.date() == jour_ref else "%d/%m %H:%M"
+        fin_txt = fin.strftime("%H:%M") if pd.notna(fin) else "…"
+        return f"n°{df.at[j, 'id']} ({debut.strftime(fmt)}–{fin_txt})"
+
+    textes = pd.Series("", index=df.index, dtype=object)
+    for idx, liste in partenaires.items():
+        if liste:
+            jour_ref = df.at[idx, "heure_debut"].date()
+            noms = ", ".join(libelle(j, jour_ref) for j in sorted(set(liste), key=lambda j: df.at[j, "heure_debut"]))
+            textes.at[idx] = f"{MOTIF_CHEVAUCHEMENT} {noms}"
+    return textes
 
 
 # ---------------------------------------------------------------------------
@@ -544,11 +697,36 @@ function(p) {
 
 
 def _js_format_nombre(decimales: int, suffixe: str = "") -> JsCode:
+    """Nombre au format français dans les tableaux : 1 234,56."""
     return JsCode(f"""
 function(p) {{
     if (p.value === null || p.value === undefined || isNaN(p.value)) return '–';
-    return Number(p.value).toFixed({decimales}) + '{suffixe}';
+    return Number(p.value).toLocaleString('fr-FR', {{minimumFractionDigits: {decimales},
+                                                    maximumFractionDigits: {decimales}}}) + '{suffixe}';
 }}""")
+
+
+# Libellés affichés dans les en-têtes des tableaux. Les noms techniques restent
+# les noms de champ (utilisés par le code, ex. la ligne sélectionnée) ; seul
+# l'en-tête affiché change.
+LIBELLES_COLONNES = {
+    "id": "N°",
+    "created_at": "Créé le",
+    "operateur": "Opérateur",
+    "operation": "Opération",
+    "ordre_fabrication": "Dossier",
+    "numero_dossier": "Dossier",
+    "numero_devis": "Devis",
+    "client": "Client",
+    "reference": "Référence",
+    "heure_debut": "Début",
+    "heure_fin": "Fin",
+    "Durée h": "Durée (h)",
+    "temps_devis (h)": "Devisé (h)",
+    "temps_operateurs (h)": "Réalisé (h)",
+    "delta (h)": "Écart (h)",
+    "ratio (opérateurs-devis)/devis (%)": "Écart (%)",
+}
 
 
 def afficher_tableau(df: pd.DataFrame, key: str, style_ligne=None, hauteur_max: int = 450,
@@ -601,7 +779,7 @@ def afficher_tableau(df: pd.DataFrame, key: str, style_ligne=None, hauteur_max: 
             )
         elif pd.api.types.is_numeric_dtype(serie) and col != "id":
             if "%" in col:
-                fmt = _js_format_nombre(0, "%")
+                fmt = _js_format_nombre(0, "\u202f%")
             elif pd.api.types.is_integer_dtype(serie):
                 fmt = _js_format_nombre(0)
             else:
@@ -616,6 +794,13 @@ def afficher_tableau(df: pd.DataFrame, key: str, style_ligne=None, hauteur_max: 
             df[col] = serie.astype("string").where(serie.notna(), None)
             extra = {"minWidth": 320, "wrapText": True, "autoHeight": True} if col == "Alertes" else {}
             gb.configure_column(col, filter="agTextColumnFilter", filterParams={"buttons": ["reset"]}, **extra)
+
+    # En-têtes lisibles (après la configuration ci-dessus : chaque appel à
+    # configure_column réécrit l'en-tête s'il n'est pas fourni)
+    for col in df.columns:
+        if col != "_couleur":
+            libelle = LIBELLES_COLONNES.get(col, col)
+            gb.configure_column(col, header_name=libelle, headerTooltip=libelle)
 
     gb.configure_grid_options(
         localeText=_TRADUCTION_AGGRID,
@@ -694,7 +879,11 @@ def section_pointages_suspects(pointages: pd.DataFrame, periode: str, ancre: str
         return
 
     # Nombre de pointages par motif
-    nb_par_motif = suspects["motifs_suspects"].str.split(" · ").explode().value_counts()
+    nb_par_motif = (
+        suspects["motifs_suspects"].str.split(" · ").explode()
+        .where(lambda m: ~m.str.startswith(MOTIF_CHEVAUCHEMENT), "Chevauche un autre pointage")
+        .value_counts()
+    )
     st.markdown(" · ".join(f"**{n}** {motif.lower()}" for motif, n in nb_par_motif.items()))
 
     table = suspects[
@@ -712,9 +901,8 @@ def section_pointages_suspects(pointages: pd.DataFrame, periode: str, ancre: str
 # « Analyse d'un dossier spécifique »)
 # ---------------------------------------------------------------------------
 
-SEUIL_POINTAGE_SUSPECT_H = 10    # un pointage seul de plus de 10 h est suspect
-SEUIL_JOURNEE_SUSPECTE_H = 12    # plus de 12 h pointées par un opérateur sur une journée (toutes opérations)
-TOLERANCE_ECART_DUREE_MIN = 5    # écart toléré entre "duree" et (heure_fin - heure_debut)
+# Les pointages suspects sont détectés par marquer_pointages_suspects (une seule règle
+# pour toute l'application, calculée au chargement dans la colonne "motifs_suspects").
 
 
 def _cle_texte(serie: pd.Series) -> pd.Series:
@@ -723,45 +911,6 @@ def _cle_texte(serie: pd.Series) -> pd.Series:
         serie.astype("string").str.strip().str.replace(r"\.0$", "", regex=True)
         .str.replace(r"\s+", " ", regex=True).str.lower()
     )
-
-
-def _alertes_pointages(pts: pd.DataFrame, tous_pointages: pd.DataFrame) -> pd.Series:
-    """Renvoie, pour chaque pointage, la liste des anomalies détectées (texte)."""
-    alertes = pd.Series([[] for _ in range(len(pts))], index=pts.index, dtype=object)
-
-    def ajouter(masque, texte):
-        for i in pts.index[masque.fillna(False)]:
-            alertes.at[i] = alertes.at[i] + [texte]
-
-    ajouter(pts["Durée h"] > SEUIL_POINTAGE_SUSPECT_H, f"Pointage > {SEUIL_POINTAGE_SUSPECT_H} h")
-    ajouter(pts["heure_fin"].isna(), "Pas d'heure de fin")
-    ajouter(pts["heure_fin"] < pts["heure_debut"], "Fin avant le début")
-    ajouter(
-        pts["heure_fin"].notna() & (pts["heure_fin"].dt.date != pts["heure_debut"].dt.date),
-        "Fin un autre jour",
-    )
-    ecart_min = (
-        (pts["heure_fin"] - pts["heure_debut"]).dt.total_seconds() / 60 - pts["duree"] / 60_000
-    ).abs()
-    ajouter(ecart_min > TOLERANCE_ECART_DUREE_MIN, "Durée ≠ fin − début")
-
-    # Journée de l'opérateur (tous dossiers confondus) anormalement longue
-    jour = tous_pointages["heure_debut"].dt.date
-    total_jour = tous_pointages.groupby([tous_pointages["id_operateur"], jour])["Durée h"].sum()
-    cle = list(zip(pts["id_operateur"], pts["heure_debut"].dt.date))
-    total_pts = pd.Series([total_jour.get(k, np.nan) for k in cle], index=pts.index)
-    ajouter(total_pts > SEUIL_JOURNEE_SUSPECTE_H,
-            f"Opérateur > {SEUIL_JOURNEE_SUSPECTE_H} h pointées ce jour-là")
-
-    # Chevauchement avec un autre pointage du même opérateur
-    pts_tries = tous_pointages.dropna(subset=["heure_debut"]).sort_values(["id_operateur", "heure_debut"])
-    fin_prec = pts_tries.groupby("id_operateur")["heure_fin"].shift()
-    debut_suiv = pts_tries.groupby("id_operateur")["heure_debut"].shift(-1)
-    chevauche = (pts_tries["heure_debut"] < fin_prec) | (pts_tries["heure_fin"] > debut_suiv)
-    ids_chevauchement = set(pts_tries.loc[chevauche.fillna(False), "id"])
-    ajouter(pts["id"].isin(ids_chevauchement), "Chevauche un autre pointage")
-
-    return alertes
 
 
 @st.dialog("🔎 Détail des pointages", width="large")
@@ -782,45 +931,53 @@ def fenetre_detail_pointages(numero_dossier: str, operation: str, devis_h: float
 
     somme_pts = pts["Durée h"].sum()
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Temps devisé", f"{devis_h:.2f} h")
-    c2.metric("temps_operateurs (OF)", f"{realise_h:.2f} h",
-              help="Valeur de la table ordres_fabrication, affichée dans le tableau.")
-    c3.metric("Somme des pointages", f"{somme_pts:.2f} h",
-              help="Somme des pointages de temps_reel_operateur pour ce dossier et cette opération.")
-    c4.metric("Pointages / opérateurs", f"{len(pts)} / {pts['id_operateur'].nunique()}")
+    c1.metric("Devisé", fr_heures(devis_h, 2))
+    c2.metric("Réalisé (OF)", fr_heures(realise_h, 2),
+              help="Temps inscrit sur l'ordre de fabrication (table ordres_fabrication), affiché dans le tableau.")
+    c3.metric("Pointé", fr_heures(somme_pts, 2),
+              help="Somme des pointages des opérateurs (table temps_reel_operateur) pour ce dossier et cette opération.")
+    c4.metric("Pointages / op.", f"{len(pts)} / {pts['id_operateur'].nunique()}")
 
     if pd.notna(realise_h) and abs(somme_pts - realise_h) > 0.05:
         st.info(
-            f"La somme des pointages ({somme_pts:.2f} h) diffère du temps_operateurs de l'OF "
-            f"({realise_h:.2f} h) : l'OF n'est peut-être pas à jour, ou des pointages portent un "
+            f"La somme des pointages ({fr_heures(somme_pts, 2)}) diffère du temps réalisé inscrit sur l'OF "
+            f"({fr_heures(realise_h, 2)}) : l'OF n'est peut-être pas à jour, ou des pointages portent un "
             "libellé d'opération différent."
         )
 
-    pts["Alertes"] = _alertes_pointages(pts, df_pointages)
-    nb_suspects = int(pts["Alertes"].map(len).gt(0).sum())
+    # Même règle que la section « Pointages suspects » des onglets journalier / hebdomadaire
+    pts["Alertes"] = pts["motifs_suspects"]
+    est_suspect = pts["Alertes"] != ""
+    nb_suspects = int(est_suspect.sum())
     if nb_suspects:
-        heures_suspectes = pts.loc[pts["Alertes"].map(len).gt(0), "Durée h"].sum()
-        st.error(f"⚠️ {nb_suspects} pointage(s) suspect(s), soit {heures_suspectes:.2f} h "
-                 f"({heures_suspectes / somme_pts:.0%} du total pointé). Ils sont surlignés en rouge ci-dessous.")
+        heures_suspectes = pts.loc[est_suspect, "Durée h"].sum()
+        part = fr_pct(heures_suspectes / somme_pts) if somme_pts else "–"
+        st.error(f"⚠️ {nb_suspects} pointage(s) suspect(s), soit {fr_heures(heures_suspectes, 2)} "
+                 f"({part} du total pointé). Ils sont surlignés en rouge ci-dessous.")
+        st.caption(CRITERES_SUSPECTS_TEXTE)
     else:
         st.success("Aucune anomalie détectée : les heures semblent correspondre à du temps réel de production.")
 
     # Heures par jour et par opérateur : un pic isolé saute aux yeux
     st.markdown("**Heures pointées par jour**")
+    # Axe en catégories (un jour = une barre) : avec un axe de dates, un seul jour
+    # pointé donnait une barre étalée sur plusieurs jours et des dates répétées.
     par_jour = (pts.assign(jour=pts["heure_debut"].dt.normalize())
-                .groupby(["jour", "operateur"], as_index=False)["Durée h"].sum())
-    fig = px.bar(par_jour, x="jour", y="Durée h", color="operateur",
-                 labels={"jour": "", "Durée h": "Heures", "operateur": "Opérateur"})
-    fig.update_xaxes(tickformat="%d/%m/%Y")
+                .groupby(["jour", "operateur"], as_index=False)["Durée h"].sum()
+                .sort_values("jour"))
+    par_jour["jour_txt"] = par_jour["jour"].dt.strftime("%d/%m/%Y")
+    fig = px.bar(par_jour, x="jour_txt", y="Durée h", color="operateur",
+                 category_orders={"jour_txt": list(dict.fromkeys(par_jour["jour_txt"]))},
+                 labels={"jour_txt": "", "Durée h": "Heures", "operateur": "Opérateur"})
+    fig.update_xaxes(type="category")
     fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), bargap=0.3)
-    st.plotly_chart(fig, use_container_width=True, key=f"bar_detail_{numero_dossier}_{operation}")
+    st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG, key=f"bar_detail_{numero_dossier}_{operation}")
 
     st.markdown("**Pointages**")
     table = pts.sort_values("heure_debut")[
         ["id", "operateur", "heure_debut", "heure_fin", "Durée h", "Alertes"]
     ].reset_index(drop=True)
     table["Durée h"] = table["Durée h"].round(2)
-    table["Alertes"] = table["Alertes"].map(lambda a: " · ".join(a))
     afficher_tableau(
         table, key=f"grille_detail_{numero_dossier}_{operation}",
         style_ligne=lambda r: ["background-color: #f8d7da" if r["Alertes"] else ""] * len(r),
@@ -924,6 +1081,14 @@ def injecter_style() -> None:
     border-radius: 10px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,.04);
   }}
   [data-testid="stMetricLabel"] p {{ color: {GRAPHITE_LBFI}; font-weight: 600; }}
+  /* Libellés et valeurs jamais tronqués (« Opérateurs ayant poi… », « 12066… ») :
+     le libellé passe sur deux lignes si besoin. */
+  [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] * {{
+    white-space: normal !important; overflow: visible !important; text-overflow: clip !important;
+  }}
+  [data-testid="stMetricValue"], [data-testid="stMetricValue"] * {{
+    overflow: visible !important; text-overflow: clip !important;
+  }}
 
   /* Onglets */
   .stTabs [data-baseweb="tab-list"] {{ gap: 6px; border-bottom: 1px solid #E4E5E0; }}
@@ -988,6 +1153,13 @@ try:
 except Exception as e:
     st.error(f"Impossible de lire les données Supabase : {e}")
     st.stop()
+
+
+def message_aucune_cloture(periode: str) -> str:
+    """Message unique quand aucun dossier n'a été clôturé sur la période."""
+    derniere = df_of.loc[df_of["statut_production"] == "Clos", "date_cloture"].max()
+    suite = f" Dernière clôture enregistrée : {derniere.strftime('%d/%m/%Y')}." if pd.notna(derniere) else ""
+    return f"Aucun dossier clôturé {periode}.{suite}"
 
 # ---------------------------------------------------------------------------
 # Onglets — Suivi journalier / hebdomadaire / mensuel / Bilan annuel
@@ -1075,14 +1247,33 @@ with tab_jour:
 
         st.subheader("👷 Activité de la journée")
         k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("Opérateurs ayant pointé", f"{nb_op_jour}")
-        k2.metric("Heures pointées", f"{heures_jour:.1f} h",
+        # Moyenne par opérateur : en cours de journée, on la compare aux heures
+        # théoriques déjà écoulées (7,8 h au prorata des horaires d'ouverture), et
+        # non aux 7,8 h d'une journée complète.
+        moyenne_op = heures_jour / nb_op_jour if nb_op_jour else float("nan")
+        heures_possibles = TAUX_HORAIRE_JOUR * (
+            fraction_journee_ecoulee(maintenant) if est_aujourdhui else (1.0 if jour.weekday() < 5 else 0.0)
+        )
+        if est_aujourdhui and 0 < heures_possibles < TAUX_HORAIRE_JOUR:
+            valeur_moyenne = f"{fr_heures(moyenne_op)} / {fr_heures(heures_possibles)}"
+            aide_moyenne = (
+                f"Heures pointées par opérateur depuis le début de la journée, comparées aux "
+                f"{fr_heures(heures_possibles)} théoriques déjà écoulées "
+                f"({fr_heures(TAUX_HORAIRE_JOUR)} sur une journée complète, au prorata des horaires "
+                "d'ouverture 5h00–16h30)."
+            )
+        else:
+            valeur_moyenne = fr_heures(moyenne_op)
+            aide_moyenne = f"Heures pointées par opérateur, à comparer aux {fr_heures(TAUX_HORAIRE_JOUR)} théoriques d'une journée."
+
+        k1.metric("Opérateurs", f"{nb_op_jour}", help="Opérateurs ayant pointé au moins une fois ce jour-là.")
+        k2.metric("Heures pointées", fr_heures(heures_jour),
                   help="Somme des durées des pointages de la journée (pointages en cours inclus jusqu'à maintenant).")
-        k3.metric("Moyenne par opérateur", f"{heures_jour / nb_op_jour:.1f} h" if nb_op_jour else "–",
-                  help=f"À comparer aux {TAUX_HORAIRE_JOUR:.1f} h théoriques d'une journée.")
-        k4.metric("Dossiers travaillés", f"{pointages_jour['ordre_fabrication'].nunique()}")
-        k5.metric("Pointages en cours / non clôturés", f"{nb_en_cours}",
-                  help="Pointages sans heure de fin.")
+        k3.metric("Moy. / opérateur", valeur_moyenne, help=aide_moyenne)
+        k4.metric("Dossiers", f"{pointages_jour['ordre_fabrication'].nunique()}",
+                  help="Dossiers sur lesquels au moins un pointage a été fait ce jour-là.")
+        k5.metric("Non clôturés", f"{nb_en_cours}",
+                  help="Pointages sans heure de fin (en cours, ou oubli de clôture).")
 
         # --- Opérateurs actifs n'ayant pas pointé ----------------------------
         df_emp = load_employes()
@@ -1151,7 +1342,7 @@ with tab_jour:
             margin=dict(l=10, r=10, t=30, b=10),
             bargap=0.25,
         )
-        st.plotly_chart(fig_gantt, use_container_width=True, key="gantt_jour")
+        st.plotly_chart(fig_gantt, use_container_width=True, config=PLOTLY_CONFIG, key="gantt_jour")
         st.caption("Les blocs hachurés sont des pointages sans heure de fin (en cours ou oubli de clôture). "
                    "Les espaces vides entre deux blocs correspondent à du temps non pointé.")
 
@@ -1209,7 +1400,7 @@ with tab_jour:
                               text_auto=".1f", color_discrete_sequence=[COULEUR_REALISE])
         fig_dossiers.update_layout(height=80 + 28 * len(par_dossier), xaxis_title="Heures",
                                    yaxis_title=None, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig_dossiers, use_container_width=True, key="bar_dossiers_jour")
+        st.plotly_chart(fig_dossiers, use_container_width=True, config=PLOTLY_CONFIG, key="bar_dossiers_jour")
 
         # --- Détail -------------------------------------------------------------
         st.markdown("**Détail des pointages de la journée**")
@@ -1275,69 +1466,76 @@ with tab_hebdo:
 
     heures_attribuees = pointages_semaine["Durée h"].sum()
     nb_operateurs = pointages_semaine["id_operateur"].nunique()
-    jours_ouvres_semaine_sel = nb_jours_ouvres(monday, sunday)
+    semaine_en_cours = periode_en_cours(monday, sunday)
+    jours_ouvres_semaine_sel = jours_ouvres_theoriques(monday, sunday)
     temps_theorique = temps_theorique_semaine(pointages_semaine, monday, sunday)
-    taux_attribution = (heures_attribuees / temps_theorique) if temps_theorique > 0 else 0
+    taux_attribution = (heures_attribuees / temps_theorique) if temps_theorique > 0 else float("nan")
 
     st.subheader("👷 Activité des opérateurs")
+    if semaine_en_cours:
+        st.caption(
+            f"⏳ Semaine en cours : le temps théorique ne compte que les jours ouvrés déjà écoulés "
+            f"({fr_nombre(jours_ouvres_semaine_sel)} j sur {nb_jours_ouvres(monday, sunday)})."
+        )
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Nombre d'heures attribuées", f"{heures_attribuees:.1f} h")
-    c2.metric("Opérateurs ayant pointé", f"{nb_operateurs}")
+    c1.metric("Heures pointées", fr_heures(heures_attribuees),
+              help="Somme des pointages des opérateurs sur la semaine, tous dossiers confondus.")
+    c2.metric("Opérateurs", f"{nb_operateurs}", help="Opérateurs ayant pointé au moins une fois dans la semaine.")
     c3.metric(
-        "Temps travaillé théorique",
-        f"{temps_theorique:.0f} h",
+        "Temps théorique",
+        fr_heures(temps_theorique, 0),
         help=(
             f"{nb_operateurs} opérateur(s) ayant pointé au moins une fois cette semaine × "
-            f"{jours_ouvres_semaine_sel} jours ouvrés × 7,8 h. On suppose qu'un opérateur "
+            f"{fr_nombre(jours_ouvres_semaine_sel)} jours ouvrés"
+            + (" écoulés" if semaine_en_cours else "")
+            + f" × {fr_heures(TAUX_HORAIRE_JOUR)}. On suppose qu'un opérateur "
             "ayant pointé au moins une fois dans la semaine y a travaillé toute la semaine."
         ),
     )
     c4.metric(
         "Taux d'attribution",
-        f"{taux_attribution:.0%}",
-        help="Heures attribuées / temps théorique (nb opérateurs de la semaine × jours ouvrés × 7,8 h)",
+        fr_pct(taux_attribution),
+        help="Heures pointées ÷ temps théorique.",
     )
 
-    col_pie1, col_pie2 = st.columns(2)
-
-    with col_pie1:
-        st.markdown("**Répartition des heures par dossier**")
-        if not pointages_semaine.empty:
-            data1 = pie_top_n(pointages_semaine, "dossier_client", "Durée h")
-            fig1 = px.pie(data1, names="dossier_client", values="Durée h", hole=0.35)
-            fig1.update_traces(textposition="inside", textinfo="percent+label")
-            st.plotly_chart(fig1, use_container_width=True, key="pie_heures_par_dossier")
-        else:
-            st.info("Aucun pointage sur cette semaine.")
-
-    with col_pie2:
-        st.markdown("**Répartition du nombre d'heures par opérateur**")
-        if not pointages_semaine.empty:
-            data2 = pie_top_n(pointages_semaine, "operateur", "Durée h")
-            fig2 = px.pie(data2, names="operateur", values="Durée h", hole=0.35)
-            fig2.update_traces(
-                textposition="inside",
-                textinfo="label+percent",
-                texttemplate="%{label}<br>%{value:.1f} h (%{percent})",
-            )
-            st.plotly_chart(fig2, use_container_width=True, key="pie_heures_par_operateur")
-        else:
-            st.info("Aucun pointage sur cette semaine.")
-
-    st.caption(
-        "ℹ️ Dans la base source, le champ « ordre de fabrication » des pointages correspond "
-        "au numéro de dossier."
-    )
-
-    st.markdown("**Détail des pointages de la semaine**")
-    if not pointages_semaine.empty:
-        table_pointages = pointages_semaine[
-            ["id", "created_at", "operateur", "operation", "ordre_fabrication", "heure_debut", "heure_fin", "Durée h"]
-        ].sort_values("heure_debut", ascending=False).reset_index(drop=True)
-        table_pointages["Durée h"] = table_pointages["Durée h"].round(2)
-        afficher_tableau(table_pointages, key="grille_pointages_hebdo")
-    else:
+    if pointages_semaine.empty:
         st.info("Aucun pointage sur cette semaine.")
+    else:
+        col_pie1, col_pie2 = st.columns(2)
+
+        with col_pie1:
+            st.markdown("**Répartition des heures par dossier**")
+            if not pointages_semaine.empty:
+                data1 = pie_top_n(pointages_semaine, "dossier_client", "Durée h")
+                fig1 = px.pie(data1, names="dossier_client", values="Durée h", hole=0.35)
+                fig1.update_traces(textposition="inside", textinfo="percent+label")
+                st.plotly_chart(fig1, use_container_width=True, config=PLOTLY_CONFIG, key="pie_heures_par_dossier")
+            else:
+                st.info("Aucun pointage sur cette semaine.")
+
+        with col_pie2:
+            st.markdown("**Répartition du nombre d'heures par opérateur**")
+            if not pointages_semaine.empty:
+                data2 = pie_top_n(pointages_semaine, "operateur", "Durée h")
+                fig2 = px.pie(data2, names="operateur", values="Durée h", hole=0.35)
+                fig2.update_traces(
+                    textposition="inside",
+                    textinfo="label+percent",
+                    texttemplate="%{label}<br>%{value:.1f} h (%{percent})",
+                )
+                st.plotly_chart(fig2, use_container_width=True, config=PLOTLY_CONFIG, key="pie_heures_par_operateur")
+            else:
+                st.info("Aucun pointage sur cette semaine.")
+
+        st.markdown("**Détail des pointages de la semaine**")
+        if not pointages_semaine.empty:
+            table_pointages = pointages_semaine[
+                ["id", "created_at", "operateur", "operation", "ordre_fabrication", "heure_debut", "heure_fin", "Durée h"]
+            ].sort_values("heure_debut", ascending=False).reset_index(drop=True)
+            table_pointages["Durée h"] = table_pointages["Durée h"].round(2)
+            afficher_tableau(table_pointages, key="grille_pointages_hebdo")
+        else:
+            st.info("Aucun pointage sur cette semaine.")
 
     # ---------------------------------------------------------------------------
     # Indicateurs — dossiers clôturés dans la semaine
@@ -1355,163 +1553,169 @@ with tab_hebdo:
     st.divider()
     st.subheader("📦 Dossiers clôturés cette semaine")
 
-    heures_livrees = of_semaine["temps_operateurs_h"].sum()
-    heures_theoriques = of_semaine["temps_devis_h"].sum()
-    ratio_temps = (heures_livrees / heures_theoriques) if heures_theoriques > 0 else 0
-    nb_dossiers_clotures = of_semaine["numero_dossier"].nunique()
-
-    d1, d2, d3, d4 = st.columns(4)
-    d1.metric("Nombre de dossiers clôturés", f"{nb_dossiers_clotures}")
-    d2.metric("Heures livrées cette semaine", f"{heures_livrees:.1f} h")
-    d3.metric("Heures théoriques livrées cette semaine", f"{heures_theoriques:.1f} h")
-    d4.metric("Ratio temps (livré / théorique)", f"{ratio_temps:.0%}")
-
-    st.markdown("**Temps par poste**")
-    if not of_semaine.empty:
-        par_poste = (
-            of_semaine.groupby("poste")[["temps_operateurs_h", "temps_devis_h"]]
-            .sum()
-            .rename(columns={"temps_operateurs_h": "Temps réalisé", "temps_devis_h": "Temps devisé"})
-            .sort_values("Temps devisé", ascending=True)
-            .reset_index()
-        )
-        fig_poste = px.bar(
-            par_poste,
-            y="poste",
-            x=["Temps réalisé", "Temps devisé"],
-            orientation="h",
-            barmode="group",
-            labels={"value": "Heures", "poste": "", "variable": ""},
-            color_discrete_map=COLOR_MAP_DEVIS_REALISE,
-        )
-        fig_poste.update_layout(legend_title_text="")
-        st.plotly_chart(fig_poste, use_container_width=True, key="bar_temps_par_poste")
+    if of_semaine.empty:
+        st.info(message_aucune_cloture("cette semaine"))
     else:
-        st.info("Aucun dossier clôturé sur cette semaine.")
+        heures_livrees = of_semaine["temps_operateurs_h"].sum()
+        heures_theoriques = of_semaine["temps_devis_h"].sum()
+        ratio_temps = (heures_livrees / heures_theoriques) if heures_theoriques > 0 else 0
+        nb_dossiers_clotures = of_semaine["numero_dossier"].nunique()
 
-    st.markdown("**Temps par dossier clôturé**")
-    if not of_semaine.empty:
-        of_semaine_label = of_semaine.copy()
-        of_semaine_label["dossier_client"] = (
-            of_semaine_label["numero_dossier"].astype(str) + " – " + of_semaine_label["client"].fillna("Client inconnu")
-        )
-        par_dossier = (
-            of_semaine_label.groupby("dossier_client")[["temps_operateurs_h", "temps_devis_h"]]
-            .sum()
-            .rename(columns={"temps_operateurs_h": "Temps réalisé", "temps_devis_h": "Temps devisé"})
-            .sort_values("Temps devisé", ascending=True)
-            .reset_index()
-        )
-        fig_dossier = px.bar(
-            par_dossier,
-            y="dossier_client",
-            x=["Temps réalisé", "Temps devisé"],
-            orientation="h",
-            barmode="group",
-            labels={"value": "Heures", "dossier_client": "", "variable": ""},
-            color_discrete_map=COLOR_MAP_DEVIS_REALISE,
-        )
-        fig_dossier.update_layout(legend_title_text="", height=max(300, 40 * len(par_dossier)))
-        st.plotly_chart(fig_dossier, use_container_width=True, key="bar_temps_par_dossier")
-    else:
-        st.info("Aucun dossier clôturé sur cette semaine.")
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("Dossiers clôturés", f"{nb_dossiers_clotures}")
+        d2.metric("Heures réalisées", fr_heures(heures_livrees),
+                  help="Temps inscrit sur les ordres de fabrication des dossiers clôturés cette semaine.")
+        d3.metric("Heures devisées", fr_heures(heures_theoriques),
+                  help="Temps prévu au devis pour ces mêmes dossiers.")
+        d4.metric("Réalisé / devisé", fr_pct(ratio_temps),
+                  help="Heures réalisées ÷ heures devisées. Au-dessus de 100 % : dépassement du devis.")
 
-    st.markdown("**Ordres de fabrication clôturés dans la semaine**")
-    if not of_semaine.empty:
-        # -----------------------------------------------------------------------
-        # Ajout du filtre sur le numéro de dossier
-        # -----------------------------------------------------------------------
-        dossiers_disponibles = sorted(
-            of_semaine["numero_dossier"].dropna().astype(str).unique().tolist()
-        )
+        st.markdown("**Temps par poste**")
+        if not of_semaine.empty:
+            par_poste = (
+                of_semaine.groupby("poste")[["temps_operateurs_h", "temps_devis_h"]]
+                .sum()
+                .rename(columns={"temps_operateurs_h": "Temps réalisé", "temps_devis_h": "Temps devisé"})
+                .sort_values("Temps devisé", ascending=True)
+                .reset_index()
+            )
+            fig_poste = px.bar(
+                par_poste,
+                y="poste",
+                x=["Temps réalisé", "Temps devisé"],
+                orientation="h",
+                barmode="group",
+                labels={"value": "Heures", "poste": "", "variable": ""},
+                color_discrete_map=COLOR_MAP_DEVIS_REALISE,
+            )
+            fig_poste.update_layout(legend_title_text="")
+            st.plotly_chart(fig_poste, use_container_width=True, config=PLOTLY_CONFIG, key="bar_temps_par_poste")
+        else:
+            st.info("Aucun dossier clôturé sur cette semaine.")
 
-        f_col1, f_col2 = st.columns([2, 1])
-        with f_col1:
-            selected_dossiers = st.multiselect(
-                "🔎 Filtrer par numéro de dossier",
-                options=dossiers_disponibles,
-                default=[],
-                placeholder="Sélectionnez un ou plusieurs dossiers (laisser vide pour tout voir)",
+        st.markdown("**Temps par dossier clôturé**")
+        if not of_semaine.empty:
+            of_semaine_label = of_semaine.copy()
+            of_semaine_label["dossier_client"] = (
+                of_semaine_label["numero_dossier"].astype(str) + " – " + of_semaine_label["client"].fillna("Client inconnu")
+            )
+            par_dossier = (
+                of_semaine_label.groupby("dossier_client")[["temps_operateurs_h", "temps_devis_h"]]
+                .sum()
+                .rename(columns={"temps_operateurs_h": "Temps réalisé", "temps_devis_h": "Temps devisé"})
+                .sort_values("Temps devisé", ascending=True)
+                .reset_index()
+            )
+            fig_dossier = px.bar(
+                par_dossier,
+                y="dossier_client",
+                x=["Temps réalisé", "Temps devisé"],
+                orientation="h",
+                barmode="group",
+                labels={"value": "Heures", "dossier_client": "", "variable": ""},
+                color_discrete_map=COLOR_MAP_DEVIS_REALISE,
+            )
+            fig_dossier.update_layout(legend_title_text="", height=max(300, 40 * len(par_dossier)))
+            st.plotly_chart(fig_dossier, use_container_width=True, config=PLOTLY_CONFIG, key="bar_temps_par_dossier")
+        else:
+            st.info("Aucun dossier clôturé sur cette semaine.")
+
+        st.markdown("**Ordres de fabrication clôturés dans la semaine**")
+        if not of_semaine.empty:
+            # -----------------------------------------------------------------------
+            # Ajout du filtre sur le numéro de dossier
+            # -----------------------------------------------------------------------
+            dossiers_disponibles = sorted(
+                of_semaine["numero_dossier"].dropna().astype(str).unique().tolist()
             )
 
-        # Filtrage du dataframe selon la sélection
-        if selected_dossiers:
-            of_semaine_filtered = of_semaine[
-                of_semaine["numero_dossier"].astype(str).isin(selected_dossiers)
-            ].copy()
+            f_col1, f_col2 = st.columns([2, 1])
+            with f_col1:
+                selected_dossiers = st.multiselect(
+                    "🔎 Filtrer par numéro de dossier",
+                    options=dossiers_disponibles,
+                    default=[],
+                    placeholder="Sélectionnez un ou plusieurs dossiers (laisser vide pour tout voir)",
+                )
+
+            # Filtrage du dataframe selon la sélection
+            if selected_dossiers:
+                of_semaine_filtered = of_semaine[
+                    of_semaine["numero_dossier"].astype(str).isin(selected_dossiers)
+                ].copy()
+            else:
+                of_semaine_filtered = of_semaine.copy()
+
+            # -----------------------------------------------------------------------
+            # Construction du tableau avec les données filtrées
+            # -----------------------------------------------------------------------
+            if not of_semaine_filtered.empty:
+                table_of = of_semaine_filtered[
+                    [
+                        "id",
+                        "created_at",
+                        "numero_devis",
+                        "numero_dossier",
+                        "client",
+                        "reference",
+                        "operation",
+                        "temps_devis_h",
+                        "temps_operateurs_h",
+                    ]
+                ].rename(
+                    columns={
+                        "temps_devis_h": "temps_devis (h)",
+                        "temps_operateurs_h": "temps_operateurs (h)",
+                    }
+                ).sort_values("created_at", ascending=False).reset_index(drop=True)
+
+                table_of["temps_devis (h)"] = table_of["temps_devis (h)"].round(2)
+                table_of["temps_operateurs (h)"] = table_of["temps_operateurs (h)"].round(2)
+
+                # Delta = temps_operateurs - temps_devis (positif si heures en trop)
+                table_of["delta (h)"] = (
+                    table_of["temps_operateurs (h)"] - table_of["temps_devis (h)"]
+                ).round(2)
+
+                # Ratio = (temps_operateurs - temps_devis) / temps_devis
+                table_of["ratio (opérateurs-devis)/devis (%)"] = (
+                    table_of["delta (h)"]
+                    / table_of["temps_devis (h)"].replace(0, float("nan"))
+                    * 100
+                ).round(1)
+
+                ecart_pct = table_of["ratio (opérateurs-devis)/devis (%)"]
+
+                def highlight_row(row):
+                    pct = ecart_pct.loc[row.name]
+
+                    # Opération non pointée (Gris)
+                    if row["temps_operateurs (h)"] == 0:
+                        return ["background-color: #e2e3e5"] * len(row)
+
+                    if pd.isna(pct):
+                        return [""] * len(row)
+                    if pct > seuil_ecart:
+                        color = "background-color: #f8d7da"  # Rouge : plus long que prévu (dépassement)
+                    elif pct < -seuil_ecart:
+                        color = "background-color: #ffe5b4"  # Orange : plus rapide que prévu (économie)
+                    else:
+                        color = "background-color: #d4edda"  # Vert : dans la tolérance
+                    return [color] * len(row)
+
+                ligne_of = afficher_tableau(table_of, key="grille_table_of",
+                                            style_ligne=highlight_row, selection=True)
+                bouton_detail_pointages(ligne_of, None, key="btn_detail_of_hebdo")
+                st.caption(
+                    "⬜ Opération non pointée (0h) · "
+                    "🟥 Écart trop positif (dépassement d'heures) · "
+                    "🟧 Écart trop négatif (dossier plus rapide que prévu) · "
+                    "🟩 Écart nul ou faible, dans la tolérance."
+                )
+            else:
+                st.info("Aucun dossier ne correspond aux critères de recherche sélectionnés.")
         else:
-            of_semaine_filtered = of_semaine.copy()
-
-        # -----------------------------------------------------------------------
-        # Construction du tableau avec les données filtrées
-        # -----------------------------------------------------------------------
-        if not of_semaine_filtered.empty:
-            table_of = of_semaine_filtered[
-                [
-                    "id",
-                    "created_at",
-                    "numero_devis",
-                    "numero_dossier",
-                    "client",
-                    "reference",
-                    "operation",
-                    "temps_devis_h",
-                    "temps_operateurs_h",
-                ]
-            ].rename(
-                columns={
-                    "temps_devis_h": "temps_devis (h)",
-                    "temps_operateurs_h": "temps_operateurs (h)",
-                }
-            ).sort_values("created_at", ascending=False).reset_index(drop=True)
-
-            table_of["temps_devis (h)"] = table_of["temps_devis (h)"].round(2)
-            table_of["temps_operateurs (h)"] = table_of["temps_operateurs (h)"].round(2)
-
-            # Delta = temps_operateurs - temps_devis (positif si heures en trop)
-            table_of["delta (h)"] = (
-                table_of["temps_operateurs (h)"] - table_of["temps_devis (h)"]
-            ).round(2)
-
-            # Ratio = (temps_operateurs - temps_devis) / temps_devis
-            table_of["ratio (opérateurs-devis)/devis (%)"] = (
-                table_of["delta (h)"]
-                / table_of["temps_devis (h)"].replace(0, float("nan"))
-                * 100
-            ).round(1)
-
-            ecart_pct = table_of["ratio (opérateurs-devis)/devis (%)"]
-
-            def highlight_row(row):
-                pct = ecart_pct.loc[row.name]
-
-                # Opération non pointée (Gris)
-                if row["temps_operateurs (h)"] == 0:
-                    return ["background-color: #e2e3e5"] * len(row)
-
-                if pd.isna(pct):
-                    return [""] * len(row)
-                if pct > seuil_ecart:
-                    color = "background-color: #f8d7da"  # Rouge : plus long que prévu (dépassement)
-                elif pct < -seuil_ecart:
-                    color = "background-color: #ffe5b4"  # Orange : plus rapide que prévu (économie)
-                else:
-                    color = "background-color: #d4edda"  # Vert : dans la tolérance
-                return [color] * len(row)
-
-            ligne_of = afficher_tableau(table_of, key="grille_table_of",
-                                        style_ligne=highlight_row, selection=True)
-            bouton_detail_pointages(ligne_of, None, key="btn_detail_of_hebdo")
-            st.caption(
-                "⬜ Opération non pointée (0h) · "
-                "🟥 Écart trop positif (dépassement d'heures) · "
-                "🟧 Écart trop négatif (dossier plus rapide que prévu) · "
-                "🟩 Écart nul ou faible, dans la tolérance."
-            )
-        else:
-            st.info("Aucun dossier ne correspond aux critères de recherche sélectionnés.")
-    else:
-        st.info("Aucun dossier clôturé sur cette semaine.")
+            st.info("Aucun dossier clôturé sur cette semaine.")
 
 
     # ---------------------------------------------------------------------------
@@ -1547,12 +1751,12 @@ with tab_hebdo:
             ecart_total = realise_total - devis_total
 
             c_spec1, c_spec2, c_spec3 = st.columns(3)
-            c_spec1.metric("Temps devisé (Total)", f"{devis_total:.1f} h")
-            c_spec2.metric("Temps réalisé (Total)", f"{realise_total:.1f} h")
+            c_spec1.metric("Heures devisées", fr_heures(devis_total))
+            c_spec2.metric("Heures réalisées", fr_heures(realise_total))
 
             # Coloration de l'écart : Rouge si on dépasse le devis (>0), Vert si en dessous (<=0)
             delta_color = "inverse" if ecart_total > 0 else "normal"
-            c_spec3.metric("Écart (Réalisé - Devis)", f"{ecart_total:.1f} h", delta_color=delta_color)
+            c_spec3.metric("Écart réalisé − devisé", fr_heures(ecart_total), delta_color=delta_color)
 
             # 5. Graphique : Temps par poste
             st.markdown("**Temps par poste**")
@@ -1575,7 +1779,7 @@ with tab_hebdo:
                 color_discrete_map=COLOR_MAP_DEVIS_REALISE,
             )
             fig_poste_spec.update_layout(legend_title_text="")
-            st.plotly_chart(fig_poste_spec, use_container_width=True, key=f"bar_spec_{dossier_choisi}")
+            st.plotly_chart(fig_poste_spec, use_container_width=True, config=PLOTLY_CONFIG, key=f"bar_spec_{dossier_choisi}")
 
             # 6. Tableau détaillé par opérations du dossier
             st.markdown("**Détail des opérations (Ordres de Fabrication) de ce dossier**")
@@ -1705,16 +1909,23 @@ with tab_mensuel:
     heures_attribuees_m = pointages_mois["Durée h"].sum()
     nb_operateurs_m = pointages_mois["id_operateur"].nunique()
     jours_ouvres_m = nb_jours_ouvres(premier_jour, dernier_jour)
+    mois_en_cours = periode_en_cours(premier_jour, dernier_jour)
     temps_theorique_m = temps_theorique_mois_via_semaines(df_pointages, premier_jour, dernier_jour)
-    taux_attribution_m = (heures_attribuees_m / temps_theorique_m) if temps_theorique_m > 0 else 0
+    taux_attribution_m = (heures_attribuees_m / temps_theorique_m) if temps_theorique_m > 0 else float("nan")
 
     st.subheader("👷 Activité des opérateurs")
+    if mois_en_cours:
+        st.caption(
+            f"⏳ Mois en cours : le temps théorique ne compte que les jours ouvrés déjà écoulés "
+            f"({fr_nombre(jours_ouvres_theoriques(premier_jour, dernier_jour))} j sur {jours_ouvres_m})."
+        )
     cm1, cm2, cm3, cm4 = st.columns(4)
-    cm1.metric("Nombre d'heures attribuées", f"{heures_attribuees_m:.1f} h")
-    cm2.metric("Opérateurs ayant pointé", f"{nb_operateurs_m}")
+    cm1.metric("Heures pointées", fr_heures(heures_attribuees_m),
+               help="Somme des pointages des opérateurs sur le mois, tous dossiers confondus.")
+    cm2.metric("Opérateurs", f"{nb_operateurs_m}", help="Opérateurs ayant pointé au moins une fois dans le mois.")
     cm3.metric(
-        "Temps travaillé théorique",
-        f"{temps_theorique_m:.0f} h",
+        "Temps théorique",
+        fr_heures(temps_theorique_m, 0),
         help=(
             "Somme, semaine par semaine, du temps théorique de chaque semaine ISO "
             "chevauchant le mois (nb d'opérateurs distincts de la semaine complète × "
@@ -1726,50 +1937,48 @@ with tab_mensuel:
     )
     cm4.metric(
         "Taux d'attribution",
-        f"{taux_attribution_m:.0%}",
-        help="Heures attribuées / temps théorique (somme, semaine par semaine, du nb d'opérateurs × jours ouvrés × 7,8 h)",
+        fr_pct(taux_attribution_m),
+        help="Heures pointées ÷ temps théorique (somme, semaine par semaine, du nb d'opérateurs × jours ouvrés écoulés × 7,8 h).",
     )
 
-    col_pie1_m, col_pie2_m = st.columns(2)
-
-    with col_pie1_m:
-        st.markdown("**Répartition des heures par dossier**")
-        if not pointages_mois.empty:
-            data1_m = pie_top_n(pointages_mois, "dossier_client", "Durée h")
-            fig1_m = px.pie(data1_m, names="dossier_client", values="Durée h", hole=0.35)
-            fig1_m.update_traces(textposition="inside", textinfo="percent+label")
-            st.plotly_chart(fig1_m, use_container_width=True, key="pie_heures_par_dossier_mensuel")
-        else:
-            st.info("Aucun pointage sur ce mois.")
-
-    with col_pie2_m:
-        st.markdown("**Répartition du nombre d'heures par opérateur**")
-        if not pointages_mois.empty:
-            data2_m = pie_top_n(pointages_mois, "operateur", "Durée h")
-            fig2_m = px.pie(data2_m, names="operateur", values="Durée h", hole=0.35)
-            fig2_m.update_traces(
-                textposition="inside",
-                textinfo="label+percent",
-                texttemplate="%{label}<br>%{value:.1f} h (%{percent})",
-            )
-            st.plotly_chart(fig2_m, use_container_width=True, key="pie_heures_par_operateur_mensuel")
-        else:
-            st.info("Aucun pointage sur ce mois.")
-
-    st.caption(
-        "ℹ️ Dans la base source, le champ « ordre de fabrication » des pointages correspond "
-        "au numéro de dossier."
-    )
-
-    st.markdown("**Détail des pointages du mois**")
-    if not pointages_mois.empty:
-        table_pointages_m = pointages_mois[
-            ["id", "created_at", "operateur", "operation", "ordre_fabrication", "heure_debut", "heure_fin", "Durée h"]
-        ].sort_values("heure_debut", ascending=False).reset_index(drop=True)
-        table_pointages_m["Durée h"] = table_pointages_m["Durée h"].round(2)
-        afficher_tableau(table_pointages_m, key="grille_pointages_mensuel")
-    else:
+    if pointages_mois.empty:
         st.info("Aucun pointage sur ce mois.")
+    else:
+        col_pie1_m, col_pie2_m = st.columns(2)
+
+        with col_pie1_m:
+            st.markdown("**Répartition des heures par dossier**")
+            if not pointages_mois.empty:
+                data1_m = pie_top_n(pointages_mois, "dossier_client", "Durée h")
+                fig1_m = px.pie(data1_m, names="dossier_client", values="Durée h", hole=0.35)
+                fig1_m.update_traces(textposition="inside", textinfo="percent+label")
+                st.plotly_chart(fig1_m, use_container_width=True, config=PLOTLY_CONFIG, key="pie_heures_par_dossier_mensuel")
+            else:
+                st.info("Aucun pointage sur ce mois.")
+
+        with col_pie2_m:
+            st.markdown("**Répartition du nombre d'heures par opérateur**")
+            if not pointages_mois.empty:
+                data2_m = pie_top_n(pointages_mois, "operateur", "Durée h")
+                fig2_m = px.pie(data2_m, names="operateur", values="Durée h", hole=0.35)
+                fig2_m.update_traces(
+                    textposition="inside",
+                    textinfo="label+percent",
+                    texttemplate="%{label}<br>%{value:.1f} h (%{percent})",
+                )
+                st.plotly_chart(fig2_m, use_container_width=True, config=PLOTLY_CONFIG, key="pie_heures_par_operateur_mensuel")
+            else:
+                st.info("Aucun pointage sur ce mois.")
+
+        st.markdown("**Détail des pointages du mois**")
+        if not pointages_mois.empty:
+            table_pointages_m = pointages_mois[
+                ["id", "created_at", "operateur", "operation", "ordre_fabrication", "heure_debut", "heure_fin", "Durée h"]
+            ].sort_values("heure_debut", ascending=False).reset_index(drop=True)
+            table_pointages_m["Durée h"] = table_pointages_m["Durée h"].round(2)
+            afficher_tableau(table_pointages_m, key="grille_pointages_mensuel")
+        else:
+            st.info("Aucun pointage sur ce mois.")
 
     # ---------------------------------------------------------------------------
     # Indicateurs — dossiers clôturés dans le mois
@@ -1778,164 +1987,170 @@ with tab_mensuel:
     st.divider()
     st.subheader("📦 Dossiers clôturés ce mois")
 
-    heures_livrees_m = of_mois["temps_operateurs_h"].sum()
-    heures_theoriques_m = of_mois["temps_devis_h"].sum()
-    ratio_temps_m = (heures_livrees_m / heures_theoriques_m) if heures_theoriques_m > 0 else 0
-    nb_dossiers_clotures_m = of_mois["numero_dossier"].nunique()
-
-    dm1, dm2, dm3, dm4 = st.columns(4)
-    dm1.metric("Nombre de dossiers clôturés", f"{nb_dossiers_clotures_m}")
-    dm2.metric("Heures livrées ce mois", f"{heures_livrees_m:.1f} h")
-    dm3.metric("Heures théoriques livrées ce mois", f"{heures_theoriques_m:.1f} h")
-    dm4.metric("Ratio temps (livré / théorique)", f"{ratio_temps_m:.0%}")
-
-    st.markdown("**Temps par poste**")
-    if not of_mois.empty:
-        par_poste_m = (
-            of_mois.groupby("poste")[["temps_operateurs_h", "temps_devis_h"]]
-            .sum()
-            .rename(columns={"temps_operateurs_h": "Temps réalisé", "temps_devis_h": "Temps devisé"})
-            .sort_values("Temps devisé", ascending=True)
-            .reset_index()
-        )
-        fig_poste_m = px.bar(
-            par_poste_m,
-            y="poste",
-            x=["Temps réalisé", "Temps devisé"],
-            orientation="h",
-            barmode="group",
-            labels={"value": "Heures", "poste": "", "variable": ""},
-            color_discrete_map=COLOR_MAP_DEVIS_REALISE,
-        )
-        fig_poste_m.update_layout(legend_title_text="")
-        st.plotly_chart(fig_poste_m, use_container_width=True, key="bar_temps_par_poste_mensuel")
+    if of_mois.empty:
+        st.info(message_aucune_cloture("ce mois"))
     else:
-        st.info("Aucun dossier clôturé sur ce mois.")
+        heures_livrees_m = of_mois["temps_operateurs_h"].sum()
+        heures_theoriques_m = of_mois["temps_devis_h"].sum()
+        ratio_temps_m = (heures_livrees_m / heures_theoriques_m) if heures_theoriques_m > 0 else 0
+        nb_dossiers_clotures_m = of_mois["numero_dossier"].nunique()
 
-    st.markdown("**Temps par dossier clôturé**")
-    if not of_mois.empty:
-        of_mois_label = of_mois.copy()
-        of_mois_label["dossier_client"] = (
-            of_mois_label["numero_dossier"].astype(str) + " – " + of_mois_label["client"].fillna("Client inconnu")
-        )
-        par_dossier_m = (
-            of_mois_label.groupby("dossier_client")[["temps_operateurs_h", "temps_devis_h"]]
-            .sum()
-            .rename(columns={"temps_operateurs_h": "Temps réalisé", "temps_devis_h": "Temps devisé"})
-            .sort_values("Temps devisé", ascending=True)
-            .reset_index()
-        )
-        fig_dossier_m = px.bar(
-            par_dossier_m,
-            y="dossier_client",
-            x=["Temps réalisé", "Temps devisé"],
-            orientation="h",
-            barmode="group",
-            labels={"value": "Heures", "dossier_client": "", "variable": ""},
-            color_discrete_map=COLOR_MAP_DEVIS_REALISE,
-        )
-        fig_dossier_m.update_layout(legend_title_text="", height=max(300, 40 * len(par_dossier_m)))
-        st.plotly_chart(fig_dossier_m, use_container_width=True, key="bar_temps_par_dossier_mensuel")
-    else:
-        st.info("Aucun dossier clôturé sur ce mois.")
+        dm1, dm2, dm3, dm4 = st.columns(4)
+        dm1.metric("Dossiers clôturés", f"{nb_dossiers_clotures_m}")
+        dm2.metric("Heures réalisées", fr_heures(heures_livrees_m),
+                   help="Temps inscrit sur les ordres de fabrication des dossiers clôturés ce mois.")
+        dm3.metric("Heures devisées", fr_heures(heures_theoriques_m),
+                   help="Temps prévu au devis pour ces mêmes dossiers.")
+        dm4.metric("Réalisé / devisé", fr_pct(ratio_temps_m),
+                   help="Heures réalisées ÷ heures devisées. Au-dessus de 100 % : dépassement du devis.")
 
-    st.markdown("**Ordres de fabrication clôturés dans le mois**")
-    if not of_mois.empty:
-        # -----------------------------------------------------------------------
-        # Ajout du filtre sur le numéro de dossier
-        # -----------------------------------------------------------------------
-        dossiers_disponibles_m = sorted(
-            of_mois["numero_dossier"].dropna().astype(str).unique().tolist()
-        )
+        st.markdown("**Temps par poste**")
+        if not of_mois.empty:
+            par_poste_m = (
+                of_mois.groupby("poste")[["temps_operateurs_h", "temps_devis_h"]]
+                .sum()
+                .rename(columns={"temps_operateurs_h": "Temps réalisé", "temps_devis_h": "Temps devisé"})
+                .sort_values("Temps devisé", ascending=True)
+                .reset_index()
+            )
+            fig_poste_m = px.bar(
+                par_poste_m,
+                y="poste",
+                x=["Temps réalisé", "Temps devisé"],
+                orientation="h",
+                barmode="group",
+                labels={"value": "Heures", "poste": "", "variable": ""},
+                color_discrete_map=COLOR_MAP_DEVIS_REALISE,
+            )
+            fig_poste_m.update_layout(legend_title_text="")
+            st.plotly_chart(fig_poste_m, use_container_width=True, config=PLOTLY_CONFIG, key="bar_temps_par_poste_mensuel")
+        else:
+            st.info("Aucun dossier clôturé sur ce mois.")
 
-        fm_col1, fm_col2 = st.columns([2, 1])
-        with fm_col1:
-            selected_dossiers_m = st.multiselect(
-                "🔎 Filtrer par numéro de dossier",
-                options=dossiers_disponibles_m,
-                default=[],
-                placeholder="Sélectionnez un ou plusieurs dossiers (laisser vide pour tout voir)",
-                key="filtre_dossiers_mensuel",
+        st.markdown("**Temps par dossier clôturé**")
+        if not of_mois.empty:
+            of_mois_label = of_mois.copy()
+            of_mois_label["dossier_client"] = (
+                of_mois_label["numero_dossier"].astype(str) + " – " + of_mois_label["client"].fillna("Client inconnu")
+            )
+            par_dossier_m = (
+                of_mois_label.groupby("dossier_client")[["temps_operateurs_h", "temps_devis_h"]]
+                .sum()
+                .rename(columns={"temps_operateurs_h": "Temps réalisé", "temps_devis_h": "Temps devisé"})
+                .sort_values("Temps devisé", ascending=True)
+                .reset_index()
+            )
+            fig_dossier_m = px.bar(
+                par_dossier_m,
+                y="dossier_client",
+                x=["Temps réalisé", "Temps devisé"],
+                orientation="h",
+                barmode="group",
+                labels={"value": "Heures", "dossier_client": "", "variable": ""},
+                color_discrete_map=COLOR_MAP_DEVIS_REALISE,
+            )
+            fig_dossier_m.update_layout(legend_title_text="", height=max(300, 40 * len(par_dossier_m)))
+            st.plotly_chart(fig_dossier_m, use_container_width=True, config=PLOTLY_CONFIG, key="bar_temps_par_dossier_mensuel")
+        else:
+            st.info("Aucun dossier clôturé sur ce mois.")
+
+        st.markdown("**Ordres de fabrication clôturés dans le mois**")
+        if not of_mois.empty:
+            # -----------------------------------------------------------------------
+            # Ajout du filtre sur le numéro de dossier
+            # -----------------------------------------------------------------------
+            dossiers_disponibles_m = sorted(
+                of_mois["numero_dossier"].dropna().astype(str).unique().tolist()
             )
 
-        # Filtrage du dataframe selon la sélection
-        if selected_dossiers_m:
-            of_mois_filtered = of_mois[
-                of_mois["numero_dossier"].astype(str).isin(selected_dossiers_m)
-            ].copy()
+            fm_col1, fm_col2 = st.columns([2, 1])
+            with fm_col1:
+                selected_dossiers_m = st.multiselect(
+                    "🔎 Filtrer par numéro de dossier",
+                    options=dossiers_disponibles_m,
+                    default=[],
+                    placeholder="Sélectionnez un ou plusieurs dossiers (laisser vide pour tout voir)",
+                    key="filtre_dossiers_mensuel",
+                )
+
+            # Filtrage du dataframe selon la sélection
+            if selected_dossiers_m:
+                of_mois_filtered = of_mois[
+                    of_mois["numero_dossier"].astype(str).isin(selected_dossiers_m)
+                ].copy()
+            else:
+                of_mois_filtered = of_mois.copy()
+
+            # -----------------------------------------------------------------------
+            # Construction du tableau avec les données filtrées
+            # -----------------------------------------------------------------------
+            if not of_mois_filtered.empty:
+                table_of_m = of_mois_filtered[
+                    [
+                        "id",
+                        "created_at",
+                        "numero_devis",
+                        "numero_dossier",
+                        "client",
+                        "reference",
+                        "operation",
+                        "temps_devis_h",
+                        "temps_operateurs_h",
+                    ]
+                ].rename(
+                    columns={
+                        "temps_devis_h": "temps_devis (h)",
+                        "temps_operateurs_h": "temps_operateurs (h)",
+                    }
+                ).sort_values("created_at", ascending=False).reset_index(drop=True)
+
+                table_of_m["temps_devis (h)"] = table_of_m["temps_devis (h)"].round(2)
+                table_of_m["temps_operateurs (h)"] = table_of_m["temps_operateurs (h)"].round(2)
+
+                # Delta = temps_operateurs - temps_devis (positif si heures en trop)
+                table_of_m["delta (h)"] = (
+                    table_of_m["temps_operateurs (h)"] - table_of_m["temps_devis (h)"]
+                ).round(2)
+
+                # Ratio = (temps_operateurs - temps_devis) / temps_devis
+                table_of_m["ratio (opérateurs-devis)/devis (%)"] = (
+                    table_of_m["delta (h)"]
+                    / table_of_m["temps_devis (h)"].replace(0, float("nan"))
+                    * 100
+                ).round(1)
+
+                ecart_pct_m = table_of_m["ratio (opérateurs-devis)/devis (%)"]
+
+                def highlight_row_mensuel(row):
+                    pct = ecart_pct_m.loc[row.name]
+
+                    # Opération non pointée (Gris)
+                    if row["temps_operateurs (h)"] == 0:
+                        return ["background-color: #e2e3e5"] * len(row)
+
+                    if pd.isna(pct):
+                        return [""] * len(row)
+                    if pct > seuil_ecart:
+                        color = "background-color: #f8d7da"  # Rouge : plus long que prévu (dépassement)
+                    elif pct < -seuil_ecart:
+                        color = "background-color: #ffe5b4"  # Orange : plus rapide que prévu (économie)
+                    else:
+                        color = "background-color: #d4edda"  # Vert : dans la tolérance
+                    return [color] * len(row)
+
+                ligne_of_m = afficher_tableau(table_of_m, key="grille_table_of_m",
+                                              style_ligne=highlight_row_mensuel, selection=True)
+                bouton_detail_pointages(ligne_of_m, None, key="btn_detail_of_mensuel")
+                st.caption(
+                    "⬜ Opération non pointée (0h) · "
+                    "🟥 Écart trop positif (dépassement d'heures) · "
+                    "🟧 Écart trop négatif (dossier plus rapide que prévu) · "
+                    "🟩 Écart nul ou faible, dans la tolérance."
+                )
+            else:
+                st.info("Aucun dossier ne correspond aux critères de recherche sélectionnés.")
         else:
-            of_mois_filtered = of_mois.copy()
-
-        # -----------------------------------------------------------------------
-        # Construction du tableau avec les données filtrées
-        # -----------------------------------------------------------------------
-        if not of_mois_filtered.empty:
-            table_of_m = of_mois_filtered[
-                [
-                    "id",
-                    "created_at",
-                    "numero_devis",
-                    "numero_dossier",
-                    "client",
-                    "reference",
-                    "operation",
-                    "temps_devis_h",
-                    "temps_operateurs_h",
-                ]
-            ].rename(
-                columns={
-                    "temps_devis_h": "temps_devis (h)",
-                    "temps_operateurs_h": "temps_operateurs (h)",
-                }
-            ).sort_values("created_at", ascending=False).reset_index(drop=True)
-
-            table_of_m["temps_devis (h)"] = table_of_m["temps_devis (h)"].round(2)
-            table_of_m["temps_operateurs (h)"] = table_of_m["temps_operateurs (h)"].round(2)
-
-            # Delta = temps_operateurs - temps_devis (positif si heures en trop)
-            table_of_m["delta (h)"] = (
-                table_of_m["temps_operateurs (h)"] - table_of_m["temps_devis (h)"]
-            ).round(2)
-
-            # Ratio = (temps_operateurs - temps_devis) / temps_devis
-            table_of_m["ratio (opérateurs-devis)/devis (%)"] = (
-                table_of_m["delta (h)"]
-                / table_of_m["temps_devis (h)"].replace(0, float("nan"))
-                * 100
-            ).round(1)
-
-            ecart_pct_m = table_of_m["ratio (opérateurs-devis)/devis (%)"]
-
-            def highlight_row_mensuel(row):
-                pct = ecart_pct_m.loc[row.name]
-
-                # Opération non pointée (Gris)
-                if row["temps_operateurs (h)"] == 0:
-                    return ["background-color: #e2e3e5"] * len(row)
-
-                if pd.isna(pct):
-                    return [""] * len(row)
-                if pct > seuil_ecart:
-                    color = "background-color: #f8d7da"  # Rouge : plus long que prévu (dépassement)
-                elif pct < -seuil_ecart:
-                    color = "background-color: #ffe5b4"  # Orange : plus rapide que prévu (économie)
-                else:
-                    color = "background-color: #d4edda"  # Vert : dans la tolérance
-                return [color] * len(row)
-
-            ligne_of_m = afficher_tableau(table_of_m, key="grille_table_of_m",
-                                          style_ligne=highlight_row_mensuel, selection=True)
-            bouton_detail_pointages(ligne_of_m, None, key="btn_detail_of_mensuel")
-            st.caption(
-                "⬜ Opération non pointée (0h) · "
-                "🟥 Écart trop positif (dépassement d'heures) · "
-                "🟧 Écart trop négatif (dossier plus rapide que prévu) · "
-                "🟩 Écart nul ou faible, dans la tolérance."
-            )
-        else:
-            st.info("Aucun dossier ne correspond aux critères de recherche sélectionnés.")
-    else:
-        st.info("Aucun dossier clôturé sur ce mois.")
+            st.info("Aucun dossier clôturé sur ce mois.")
 
 
     # ---------------------------------------------------------------------------
@@ -1972,12 +2187,12 @@ with tab_mensuel:
             ecart_total_m = realise_total_m - devis_total_m
 
             c_spec1_m, c_spec2_m, c_spec3_m = st.columns(3)
-            c_spec1_m.metric("Temps devisé (Total)", f"{devis_total_m:.1f} h")
-            c_spec2_m.metric("Temps réalisé (Total)", f"{realise_total_m:.1f} h")
+            c_spec1_m.metric("Heures devisées", fr_heures(devis_total_m))
+            c_spec2_m.metric("Heures réalisées", fr_heures(realise_total_m))
 
             # Coloration de l'écart : Rouge si on dépasse le devis (>0), Vert si en dessous (<=0)
             delta_color_m = "inverse" if ecart_total_m > 0 else "normal"
-            c_spec3_m.metric("Écart (Réalisé - Devis)", f"{ecart_total_m:.1f} h", delta_color=delta_color_m)
+            c_spec3_m.metric("Écart réalisé − devisé", fr_heures(ecart_total_m), delta_color=delta_color_m)
 
             # 5. Graphique : Temps par poste
             st.markdown("**Temps par poste**")
@@ -2000,7 +2215,7 @@ with tab_mensuel:
                 color_discrete_map=COLOR_MAP_DEVIS_REALISE,
             )
             fig_poste_spec_m.update_layout(legend_title_text="")
-            st.plotly_chart(fig_poste_spec_m, use_container_width=True, key=f"bar_spec_mensuel_{dossier_choisi_m}")
+            st.plotly_chart(fig_poste_spec_m, use_container_width=True, config=PLOTLY_CONFIG, key=f"bar_spec_mensuel_{dossier_choisi_m}")
 
             # 6. Tableau détaillé par opérations du dossier
             st.markdown("**Détail des opérations (Ordres de Fabrication) de ce dossier**")
@@ -2130,9 +2345,14 @@ with tab_annuel:
             weekly["heures_attribuees"] / weekly["temps_theorique"].replace(0, float("nan"))
         )
         weekly["semaine"] = weekly["iso_week"].apply(lambda w: f"S{int(w):02d}")
+        # La semaine en cours est incomplète : affichée à part et exclue des moyennes
+        weekly["en_cours"] = weekly["iso_week"].apply(
+            lambda w: periode_en_cours(*week_bounds(annee_choisie, int(w)))
+        )
+        semaines_completes = weekly.loc[~weekly["en_cours"]]
 
-        moyenne_heures_semaine = weekly["heures_attribuees"].mean()
-        moyenne_taux_semaine = weekly["taux_attribution"].mean()
+        moyenne_heures_semaine = semaines_completes["heures_attribuees"].mean()
+        moyenne_taux_semaine = semaines_completes["taux_attribution"].mean()
 
         # Temps travaillé théorique = somme, semaine par semaine, du temps théorique
         # calculé exactement comme dans l'onglet "Suivi hebdomadaire" (nb d'opérateurs
@@ -2241,8 +2461,8 @@ with tab_annuel:
         l1a, l1op1, l1b, l1op2, l1c, l1op3, l1d = st.columns(GRID)
         with l1a:
             _kpi_box(
-                "Temps travaillé théorique",
-                f"{temps_travaille_theorique_annuel:.0f} h" if pd.notna(temps_travaille_theorique_annuel) else "–",
+                "Temps théorique",
+                fr_heures(temps_travaille_theorique_annuel, 0),
                 help_text="Somme, semaine par semaine, du temps théorique de chaque semaine "
                           "(nb d'opérateurs distincts ayant pointé au moins une fois durant la "
                           "semaine × jours ouvrés de la semaine × 7,8 h — calcul identique à "
@@ -2258,8 +2478,8 @@ with tab_annuel:
             _operateur("×")
         with l1b:
             _kpi_box(
-                "Taux d'attribution (année)",
-                f"{taux_attribution_annuel:.0%}" if pd.notna(taux_attribution_annuel) else "–",
+                "Taux d'attribution",
+                fr_pct(taux_attribution_annuel),
                 help_text="Part du temps théorique qui a effectivement été attribuée "
                           "(pointée) à un dossier, quel que soit son statut.",
             )
@@ -2267,8 +2487,8 @@ with tab_annuel:
             _operateur("=")
         with l1c:
             _kpi_box(
-                "Nombre total d'heures attribuées",
-                f"{heures_attribuees_total_annee:.1f} h" if pd.notna(heures_attribuees_total_annee) else "–",
+                "Heures pointées",
+                fr_heures(heures_attribuees_total_annee),
                 help_text="Somme de tous les pointages opérateurs de l'année (feuille "
                           "« temps_reel_operateur »), tous dossiers confondus, indépendamment "
                           "de leur statut (clos ou non).",
@@ -2283,8 +2503,8 @@ with tab_annuel:
             _operateur("=")
         with l2c:
             _kpi_box(
-                "Nombre total d'heures travaillées et livrées",
-                f"{heures_travaillees_livrees_annee:.1f} h",
+                "Heures réalisées (livrées)",
+                fr_heures(heures_travaillees_livrees_annee),
                 help_text="Somme des heures réellement travaillées, telles qu'enregistrées "
                           "sur les ordres de fabrication des dossiers déjà clôturés (livrés) "
                           f"en {annee_choisie}.",
@@ -2293,9 +2513,8 @@ with tab_annuel:
             _operateur("+")
         with l2d:
             _kpi_box(
-                "Nombre total d'heures travaillées et non-livrées",
-                f"{heures_travaillees_non_livrees_annee:.1f} h"
-                if pd.notna(heures_travaillees_non_livrees_annee) else "–",
+                "Heures non livrées",
+                fr_heures(heures_travaillees_non_livrees_annee),
                 help_text="Nombre total d'heures attribuées − Nombre total d'heures "
                           "travaillées et livrées. Correspond à la somme des pointages "
                           "attribués à un dossier dont le statut n'est pas encore « Clos » "
@@ -2308,8 +2527,7 @@ with tab_annuel:
         e_a, e_op1, e_b, e_op2, e_c, e_op3, e_d = st.columns(GRID)
         with e_c:
             ecart_txt = (
-                f"{ecart_relatif_devis_travaille:+.1%}"
-                if pd.notna(ecart_relatif_devis_travaille) else "–"
+                fr_pct(ecart_relatif_devis_travaille, 1, signe=True)
             )
             st.markdown(
                 "<div style='text-align:center; line-height:1.9;'>"
@@ -2330,7 +2548,7 @@ with tab_annuel:
         l3a, l3op1, l3b, l3op2, l3c, l3op3, l3d = st.columns(GRID)
         with l3a:
             _kpi_box(
-                "Nombre de dossiers clôturés",
+                "Dossiers clôturés",
                 f"{nb_dossiers_annee}",
                 help_text=f"Nombre de dossiers avec le statut « Clos » et une date de "
                           f"clôture en {annee_choisie}.",
@@ -2339,16 +2557,16 @@ with tab_annuel:
             _operateur("×")
         with l3b:
             _kpi_box(
-                "Heures devisées moy. / dossier",
-                f"{devis_moyen_dossier:.1f} h",
+                "Devisé moyen / dossier",
+                fr_heures(devis_moyen_dossier),
                 help_text="Nombre total d'heures devisées ÷ nombre de dossiers clôturés.",
             )
         with l3op2:
             _operateur("=")
         with l3c:
             _kpi_box(
-                "Nombre total d'heures devisées",
-                f"{devis_total_annee:.1f} h",
+                "Heures devisées",
+                fr_heures(devis_total_annee),
                 help_text="Somme des heures devisées (temps prévu au devis) sur l'ensemble "
                           f"des dossiers clôturés en {annee_choisie}.",
             )
@@ -2377,7 +2595,7 @@ with tab_annuel:
             color_discrete_map=COLOR_MAP_DEVIS_REALISE,
         )
         fig_poste_annee.update_layout(legend_title_text="")
-        st.plotly_chart(fig_poste_annee, use_container_width=True, key="bar_temps_par_poste_annuel")
+        st.plotly_chart(fig_poste_annee, use_container_width=True, config=PLOTLY_CONFIG, key="bar_temps_par_poste_annuel")
 
         # -------------------------------------------------------------------
         # Temps par opération
@@ -2403,7 +2621,7 @@ with tab_annuel:
             color_discrete_map=COLOR_MAP_DEVIS_REALISE,
         )
         fig_operation_annee.update_layout(legend_title_text="")
-        st.plotly_chart(fig_operation_annee, use_container_width=True, key="bar_temps_par_operation_annuel")
+        st.plotly_chart(fig_operation_annee, use_container_width=True, config=PLOTLY_CONFIG, key="bar_temps_par_operation_annuel")
     else:
         st.info("Aucun dossier clôturé sur l'année sélectionnée.")
 
@@ -2422,16 +2640,17 @@ with tab_annuel:
                 weekly,
                 x="semaine",
                 y="heures_attribuees",
-                labels={"semaine": "", "heures_attribuees": "Heures attribuées"},
+                labels={"semaine": "", "heures_attribuees": "Heures pointées"},
             )
+            marquer_periode_en_cours_barres(fig_heures_semaine, weekly, "semaine")
             fig_heures_semaine.add_hline(
                 y=moyenne_heures_semaine,
                 line_dash="dash",
                 line_color="firebrick",
-                annotation_text=f"Moyenne : {moyenne_heures_semaine:.1f} h",
+                annotation_text=f"Moyenne : {fr_heures(moyenne_heures_semaine)}",
                 annotation_position="top left",
             )
-            st.plotly_chart(fig_heures_semaine, use_container_width=True, key="bar_heures_par_semaine_annuel")
+            st.plotly_chart(fig_heures_semaine, use_container_width=True, config=PLOTLY_CONFIG, key="bar_heures_par_semaine_annuel")
 
         with col_a2:
             st.markdown("**Taux d'attribution par semaine**")
@@ -2439,30 +2658,24 @@ with tab_annuel:
                 "Heures attribuées / temps théorique de travail opérateur "
                 "(nb d'opérateurs distincts de la semaine × jours ouvrés × 7,8 h)"
             )
-            fig_taux_semaine = px.line(
-                weekly,
-                x="semaine",
-                y="taux_attribution",
-                markers=True,
-                labels={"semaine": "", "taux_attribution": "Taux d'attribution"},
-            )
-            fig_taux_semaine.update_yaxes(tickformat=".0%")
+            fig_taux_semaine = courbe_taux_avec_periode_en_cours(weekly, "semaine")
             fig_taux_semaine.add_hline(
                 y=moyenne_taux_semaine,
                 line_dash="dash",
                 line_color="firebrick",
-                annotation_text=f"Moyenne : {moyenne_taux_semaine:.0%}",
+                annotation_text=f"Moyenne : {fr_pct(moyenne_taux_semaine)}",
                 annotation_position="top left",
             )
-            st.plotly_chart(fig_taux_semaine, use_container_width=True, key="line_taux_par_semaine_annuel")
+            st.plotly_chart(fig_taux_semaine, use_container_width=True, config=PLOTLY_CONFIG, key="line_taux_par_semaine_annuel")
             st.caption(
-                f"ℹ️ La ligne « Moyenne » ({moyenne_taux_semaine:.0%}) est la moyenne simple "
+                f"ℹ️ La ligne « Moyenne » ({fr_pct(moyenne_taux_semaine)}) est la moyenne simple "
                 f"des taux hebdomadaires (chaque semaine compte pour 1, peu importe son volume "
                 f"d'heures). Le « Taux d'attribution (année) » affiché plus haut "
-                f"({taux_attribution_annuel:.0%}) est légèrement différent : c'est le total des "
+                f"({fr_pct(taux_attribution_annuel)}) est légèrement différent : c'est le total des "
                 "heures attribuées sur l'année divisé par le total du temps théorique — chaque "
                 "semaine y pèse en fonction de son volume réel d'heures, pas de façon égale. "
-                "Les deux sont corrects, ils répondent juste à une pondération différente."
+                "Les deux sont corrects, ils répondent juste à une pondération différente. "
+                "La semaine en cours (en clair) est exclue de la moyenne."
             )
     else:
         st.info("Aucun pointage sur l'année sélectionnée.")
@@ -2492,9 +2705,14 @@ with tab_annuel:
             monthly["heures_attribuees"] / monthly["temps_theorique"].replace(0, float("nan"))
         )
         monthly["mois"] = monthly["cal_month"].apply(lambda m: NOMS_MOIS[int(m) - 1])
+        # Le mois en cours est incomplet : affiché à part et exclu des moyennes
+        monthly["en_cours"] = monthly["cal_month"].apply(
+            lambda m: periode_en_cours(*month_bounds(annee_choisie, int(m)))
+        )
+        mois_complets = monthly.loc[~monthly["en_cours"]]
 
-        moyenne_heures_mois = monthly["heures_attribuees"].mean()
-        moyenne_taux_mois = monthly["taux_attribution"].mean()
+        moyenne_heures_mois = mois_complets["heures_attribuees"].mean()
+        moyenne_taux_mois = mois_complets["taux_attribution"].mean()
 
         col_am1, col_am2 = st.columns(2)
 
@@ -2504,16 +2722,17 @@ with tab_annuel:
                 monthly,
                 x="mois",
                 y="heures_attribuees",
-                labels={"mois": "", "heures_attribuees": "Heures attribuées"},
+                labels={"mois": "", "heures_attribuees": "Heures pointées"},
             )
+            marquer_periode_en_cours_barres(fig_heures_mois, monthly, "mois")
             fig_heures_mois.add_hline(
                 y=moyenne_heures_mois,
                 line_dash="dash",
                 line_color="firebrick",
-                annotation_text=f"Moyenne : {moyenne_heures_mois:.1f} h",
+                annotation_text=f"Moyenne : {fr_heures(moyenne_heures_mois)}",
                 annotation_position="top left",
             )
-            st.plotly_chart(fig_heures_mois, use_container_width=True, key="bar_heures_par_mois_annuel")
+            st.plotly_chart(fig_heures_mois, use_container_width=True, config=PLOTLY_CONFIG, key="bar_heures_par_mois_annuel")
 
         with col_am2:
             st.markdown("**Taux d'attribution par mois**")
@@ -2521,26 +2740,19 @@ with tab_annuel:
                 "Heures attribuées / temps théorique de travail opérateur "
                 "(somme, semaine par semaine, du nb d'opérateurs × jours ouvrés × 7,8 h)"
             )
-            fig_taux_mois = px.line(
-                monthly,
-                x="mois",
-                y="taux_attribution",
-                markers=True,
-                labels={"mois": "", "taux_attribution": "Taux d'attribution"},
-            )
-            fig_taux_mois.update_yaxes(tickformat=".0%")
+            fig_taux_mois = courbe_taux_avec_periode_en_cours(monthly, "mois")
             fig_taux_mois.add_hline(
                 y=moyenne_taux_mois,
                 line_dash="dash",
                 line_color="firebrick",
-                annotation_text=f"Moyenne : {moyenne_taux_mois:.0%}",
+                annotation_text=f"Moyenne : {fr_pct(moyenne_taux_mois)}",
                 annotation_position="top left",
             )
-            st.plotly_chart(fig_taux_mois, use_container_width=True, key="line_taux_par_mois_annuel")
+            st.plotly_chart(fig_taux_mois, use_container_width=True, config=PLOTLY_CONFIG, key="line_taux_par_mois_annuel")
             st.caption(
-                f"ℹ️ La ligne « Moyenne » ({moyenne_taux_mois:.0%}) est la moyenne simple "
+                f"ℹ️ La ligne « Moyenne » ({fr_pct(moyenne_taux_mois)}) est la moyenne simple "
                 "des taux mensuels (chaque mois compte pour 1, peu importe son volume "
-                "d'heures)."
+                "d'heures). Le mois en cours (en clair) est exclu de la moyenne."
             )
     else:
         st.info("Aucun pointage sur l'année sélectionnée.")
