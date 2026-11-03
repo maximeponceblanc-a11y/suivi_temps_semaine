@@ -218,8 +218,10 @@ def load_data():
 
     # --- Pointages suspects (calculés sur l'ensemble des pointages, pour que les
     # chevauchements soient détectés même entre deux semaines / deux jours) -----
-    aujourdhui_ts = pd.Timestamp.now(tz=FUSEAU_HORAIRE).tz_localize(None).normalize()
-    df_pointages["motifs_suspects"] = marquer_pointages_suspects(df_pointages, aujourdhui_ts)
+    instant_lecture = maintenant_local()
+    df_pointages["motifs_suspects"] = marquer_pointages_suspects(
+        df_pointages, instant_lecture.normalize(), instant_lecture
+    )
 
     return df_pointages, df_of, maintenant_local()
 
@@ -631,12 +633,17 @@ def travaille_en_parallele(libelle_operateur) -> bool:
     return any(n and n in nom for n in _NOMS_TRAVAIL_EN_PARALLELE)
 
 
-def marquer_pointages_suspects(df: pd.DataFrame, aujourdhui: pd.Timestamp) -> pd.Series:
+TOLERANCE_FUTUR_MIN = 5  # marge (minutes) avant de considérer qu'une heure est « dans le futur »
+
+
+def marquer_pointages_suspects(df: pd.DataFrame, aujourdhui: pd.Timestamp,
+                               maintenant: pd.Timestamp | None = None) -> pd.Series:
     """Renvoie, pour chaque pointage, la liste des motifs de suspicion (texte, "" si aucun).
 
     Un pointage est suspect s'il :
       - dure plus de SEUIL_POINTAGE_TROP_LONG_H heures ;
       - finit avant d'avoir commencé (durée négative) ;
+      - commence ou finit dans le futur (heure saisie à l'avance ou erreur de saisie) ;
       - s'étale sur plusieurs jours (ou n'est toujours pas clôturé un jour suivant) ;
       - chevauche un autre pointage du même opérateur (sauf OPERATEURS_TRAVAIL_EN_PARALLELE) ;
       - a lieu, même en partie, en dehors des horaires d'ouverture de l'atelier.
@@ -658,6 +665,12 @@ def marquer_pointages_suspects(df: pd.DataFrame, aujourdhui: pd.Timestamp) -> pd
 
     # 1 bis. Fin avant le début : durée négative, qui retire des heures aux totaux
     regles.append((fin_eff.notna() & (fin_eff < debut), "Fin avant le début (durée négative)"))
+
+    # 1 ter. Heure dans le futur : saisie anticipée ou erreur, qui gonfle les heures du jour
+    maintenant = maintenant_local() if maintenant is None else maintenant
+    limite_futur = maintenant + pd.Timedelta(minutes=TOLERANCE_FUTUR_MIN)
+    regles.append((debut > limite_futur, "Début dans le futur"))
+    regles.append(((debut <= limite_futur) & fin_eff.notna() & (fin_eff > limite_futur), "Fin dans le futur"))
 
     # 2. Pointage sur plusieurs jours
     regles.append((fin_eff.notna() & (fin_eff.dt.normalize() > jour_debut), "S'étale sur plusieurs jours"))
@@ -969,6 +982,7 @@ def afficher_tableau(df: pd.DataFrame, key: str, style_ligne=None, hauteur_max: 
 
 CRITERES_SUSPECTS_TEXTE = (
     f"Critères : pointage de plus de {SEUIL_POINTAGE_TROP_LONG_H} h, fin avant le début (durée négative), "
+    "début ou fin dans le futur (heure saisie à l'avance), "
     "pointage qui s'étale sur "
     "plusieurs jours (ou toujours ouvert un jour suivant), chevauchement avec un autre pointage "
     f"du même opérateur (sauf {', '.join(OPERATEURS_TRAVAIL_EN_PARALLELE)}, qui conduit plusieurs machines "
@@ -1227,7 +1241,7 @@ def en_tete_compacte() -> None:
     """Une seule bande : logo, titre, heure des données, Actualiser, puis le menu des pages."""
     logo = _image_base64("logo_lbfi.png")
     logo_html = f'<img src="{logo}" alt="LBFI International">' if logo else ""
-    col_titre, col_fraicheur, col_lexique, col_bouton = st.columns([6, 3, 1.2, 1.4], vertical_alignment="center")
+    col_titre, col_fraicheur, col_lexique, col_bouton = st.columns([5.2, 3, 1.6, 1.5], vertical_alignment="center")
     col_titre.markdown(
         f'<div class="lbfi-entete">{logo_html}<div class="lbfi-trait"></div>'
         '<div class="lbfi-titre">Suivi des temps de production</div></div>',
@@ -1277,7 +1291,7 @@ jours écoulés seulement pour la période en cours) × 7,8 h.
 
 **Dossier clôturé** — toutes ses opérations sont au statut « Clos ».
 
-**Pointage suspect** — plus de 12 h, fin avant le début, sur plusieurs jours, chevauchement
+**Pointage suspect** — plus de 12 h, fin avant le début, heure dans le futur, sur plusieurs jours, chevauchement
 avec un autre pointage du même opérateur, ou hors horaires d'ouverture.
 """
 
@@ -1288,8 +1302,15 @@ def _badges_suspects() -> dict:
     if suspects.empty:
         return {}
     aujourdhui = maintenant_local().date()
-    jour = st.session_state.get("periode_jour", aujourdhui)
-    semaine = st.session_state.get("periode_semaine") or id_semaine(*aujourdhui.isocalendar()[:2])
+    jour = st.session_state.get("periode_jour")
+    if jour is None:
+        try:
+            jour = date.fromisoformat(st.query_params.get("jour", ""))
+        except ValueError:
+            jour = aujourdhui
+    semaine = st.session_state.get("periode_semaine") or st.query_params.get("semaine", "")
+    if not re.fullmatch(r"\d{4}-S\d{2}", semaine):
+        semaine = id_semaine(*aujourdhui.isocalendar()[:2])
     annee, num = (int(x) for x in semaine.split("-S"))
     return {
         "": int((suspects["heure_debut"].dt.date == jour).sum()),  # page Journée (racine du site)
@@ -1474,21 +1495,26 @@ def graphique_devis_realise(of: pd.DataFrame, col: str, key: str, top: int | Non
                 marker_color=COULEUR_DEVISE,
                 hovertemplate="%{y}<br>Devisé : %{x:.1f} h<extra></extra>")
     fig.add_bar(y=agg.index, x=agg["realise"], orientation="h", name="Réalisé", width=0.38,
-                marker_color=couleurs, text=etiquettes, textposition="outside", cliponaxis=False,
+                marker_color=couleurs,
                 hovertemplate="%{y}<br>Réalisé : %{x:.1f} h<extra></extra>")
+    # Étiquette placée après la plus longue des deux barres (jamais par-dessus la barre grise)
+    fig.add_scatter(y=agg.index, x=agg[["devise", "realise"]].max(axis=1), mode="text",
+                    text=etiquettes, textposition="middle right", cliponaxis=False,
+                    textfont=dict(size=12, color="#2B2B2A"), hoverinfo="skip")
     fig.update_layout(
         barmode="overlay", height=max(220, 70 + 34 * len(agg)),
-        margin=dict(l=10, r=110, t=10, b=10), showlegend=False,
+        margin=dict(l=10, r=140, t=10, b=10), showlegend=False,
         xaxis_title="Heures", yaxis_title=None,
     )
     st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG, key=key)
     st.caption(
-        f"Barre grise : devisé · barre fine : réalisé, 🟥 si dépassement de plus de {seuil_pct} %, "
-        f"🟦 si sous le devis de plus de {seuil_pct} %, 🟩 sinon. Plus gros dépassement en haut."
+        f"Barre grise : devisé · barre fine : réalisé, :red[**■ dépassement de plus de {seuil_pct} %**] · "
+        f":blue[**■ sous le devis de plus de {seuil_pct} %**] · :green[**■ dans la tolérance**]. "
+        "Plus gros dépassement en haut."
     )
     if reste is not None:
         nom = LIBELLES_CATEGORIES.get(col, col)
-        with st.expander(f"Voir les {len(reste)} autres {nom} (écarts plus faibles)"):
+        if st.toggle(f"Afficher les {len(reste)} autres {nom} (écarts plus faibles)", key=f"{key}_voir_reste"):
             tableau = reste.sort_values("ecart_h", ascending=False).reset_index().rename(columns={
                 col: "Libellé", "devise": "Devisé (h)", "realise": "Réalisé (h)",
                 "ecart_h": "Écart (h)", "ecart_pct": "Écart (%)",
@@ -1830,7 +1856,9 @@ def page_jour():
         # Le jour est déjà choisi : on n'affiche que l'heure
         table_jour["heure_debut"] = table_jour["heure_debut"].dt.strftime("%H:%M")
         table_jour["heure_fin"] = table_jour["heure_fin"].dt.strftime("%H:%M").fillna("en cours")
-        with st.expander(f"Détail des {len(table_jour)} pointages de la journée"):
+        # Interrupteur plutôt que volet replié : un tableau créé dans un volet fermé
+        # se dimensionne à 0 px de large et reste vide à l'ouverture.
+        if st.toggle(f"Afficher le détail des {len(table_jour)} pointages de la journée", key="voir_detail_jour"):
             afficher_tableau(table_jour, key="grille_pointages_jour")
 
         # --- Pointages suspects (bas de page) -----------------------------------
@@ -1935,7 +1963,8 @@ def page_semaine():
                 ["id", "operateur", "operation", "ordre_fabrication", "heure_debut", "heure_fin", "Durée h"]
             ].sort_values("heure_debut").reset_index(drop=True)
             table_pointages["Durée h"] = table_pointages["Durée h"].round(2)
-            with st.expander(f"Détail des {len(table_pointages)} pointages de la semaine"):
+            if st.toggle(f"Afficher le détail des {len(table_pointages)} pointages de la semaine",
+                         key="voir_detail_semaine"):
                 afficher_tableau(table_pointages, key="grille_pointages_hebdo")
         else:
             st.info("Aucun pointage sur cette semaine.")
@@ -2134,7 +2163,8 @@ def page_mois():
                 ["id", "operateur", "operation", "ordre_fabrication", "heure_debut", "heure_fin", "Durée h"]
             ].sort_values("heure_debut").reset_index(drop=True)
             table_pointages_m["Durée h"] = table_pointages_m["Durée h"].round(2)
-            with st.expander(f"Détail des {len(table_pointages_m)} pointages du mois"):
+            if st.toggle(f"Afficher le détail des {len(table_pointages_m)} pointages du mois",
+                         key="voir_detail_mois"):
                 afficher_tableau(table_pointages_m, key="grille_pointages_mensuel")
         else:
             st.info("Aucun pointage sur ce mois.")
@@ -2582,14 +2612,14 @@ def _graphiques_evolution(donnees: pd.DataFrame, col_x: str, moyenne_heures: flo
         marquer_periode_en_cours_barres(fig_h, donnees, col_x)
         fig_h.add_hline(y=moyenne_heures, line_dash="dash", line_color="firebrick",
                         annotation_text=f"Moyenne : {fr_heures(moyenne_heures)}",
-                        annotation_position="top left")
+                        annotation_position="top left", annotation_bgcolor="rgba(255,255,255,0.85)")
         st.plotly_chart(fig_h, use_container_width=True, config=PLOTLY_CONFIG, key=f"bar_heures_{cle}")
     with col_d:
         st.markdown(f"**Taux d'attribution par {unite}**")
         fig_t = courbe_taux_avec_periode_en_cours(donnees, col_x)
         fig_t.add_hline(y=moyenne_taux, line_dash="dash", line_color="firebrick",
                         annotation_text=f"Moyenne : {fr_pct(moyenne_taux)}",
-                        annotation_position="top left")
+                        annotation_position="top left", annotation_bgcolor="rgba(255,255,255,0.85)")
         st.plotly_chart(fig_t, use_container_width=True, config=PLOTLY_CONFIG, key=f"line_taux_{cle}")
     st.caption(f"Lignes pointillées : moyenne des {'semaines terminées' if unite == 'semaine' else 'mois terminés'} "
                f"(le taux est pondéré par le temps théorique, comme le taux de l'année). "
