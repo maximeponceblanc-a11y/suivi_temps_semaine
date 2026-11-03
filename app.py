@@ -221,7 +221,7 @@ def load_data():
     aujourdhui_ts = pd.Timestamp.now(tz=FUSEAU_HORAIRE).tz_localize(None).normalize()
     df_pointages["motifs_suspects"] = marquer_pointages_suspects(df_pointages, aujourdhui_ts)
 
-    return df_pointages, df_of
+    return df_pointages, df_of, maintenant_local()
 
 
 def _normalise_id(serie: pd.Series) -> pd.Series:
@@ -827,7 +827,9 @@ def afficher_tableau(df: pd.DataFrame, key: str, style_ligne=None, hauteur_max: 
         update_on=["selectionChanged"] if selection else [],
         custom_css={
             ".ag-row-selected": {"outline": "2px solid #0068C9 !important",
-                                 "outline-offset": "-2px", "font-weight": "600"},
+                                 "outline-offset": "-2px", "font-weight": "600",
+                                 "--ag-selected-row-background-color": "transparent"},
+            ".ag-row-selected::before": {"background-color": "transparent !important"},
             ".ag-row": {"cursor": "pointer" if selection else "default"},
         },
         show_toolbar=False,
@@ -1047,33 +1049,26 @@ def _image_base64(nom: str) -> str | None:
 def injecter_style() -> None:
     st.markdown(f"""
 <style>
-  /* Bandeaux photo */
-  .lbfi-hero, .lbfi-bandeau {{
-    position: relative; border-radius: 14px; overflow: hidden;
-    background-size: cover; background-position: center; color: #fff;
-  }}
-  .lbfi-hero {{ min-height: 190px; padding: 26px 32px; display: flex; align-items: flex-end;
-               justify-content: space-between; gap: 24px; margin-bottom: 8px; }}
-  .lbfi-hero::before, .lbfi-bandeau::before {{
-    content: ""; position: absolute; inset: 0;
-    background: linear-gradient(100deg, rgba(25,27,24,.86) 0%, rgba(25,27,24,.55) 55%, rgba(25,27,24,.15) 100%);
-  }}
-  .lbfi-hero > *, .lbfi-bandeau > * {{ position: relative; }}
-  .lbfi-hero h1 {{ color: #fff; font-size: 2.1rem; line-height: 1.15; margin: 0; padding: 0; font-weight: 700; }}
-  .lbfi-hero p {{ color: rgba(255,255,255,.82); margin: 6px 0 0 0; font-size: 1rem; }}
-  .lbfi-hero .lbfi-trait {{ width: 56px; height: 4px; background: {VERT_LBFI}; border-radius: 2px; margin-bottom: 12px; }}
-  .lbfi-hero .lbfi-logo {{ background: #fff; border-radius: 10px; padding: 8px 12px; flex-shrink: 0; }}
-  .lbfi-hero .lbfi-logo img {{ height: 46px; display: block; }}
-  .lbfi-bandeau {{ min-height: 92px; padding: 18px 26px; margin: 4px 0 18px 0; display: flex;
-                   flex-direction: column; justify-content: center; }}
-  .lbfi-bandeau h2 {{ color: #fff; margin: 0; padding: 0; font-size: 1.45rem; font-weight: 650; }}
-  .lbfi-bandeau p {{ color: rgba(255,255,255,.82); margin: 4px 0 0 0; font-size: .92rem; }}
-  .lbfi-bandeau h2::before {{ content: ""; display: inline-block; width: 6px; height: 1.05em;
-                              background: {VERT_LBFI}; border-radius: 2px; margin-right: 10px; vertical-align: -2px; }}
-  @media (max-width: 700px) {{
-    .lbfi-hero {{ flex-direction: column-reverse; align-items: flex-start; padding: 20px; }}
-    .lbfi-hero h1 {{ font-size: 1.6rem; }}
-  }}
+  /* Pas de barre latérale : tous les réglages sont dans les pages */
+  [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"],
+  [data-testid="collapsedControl"] {{ display: none !important; }}
+  .block-container {{ padding-top: 1.2rem; }}
+
+  /* En-tête compact */
+  .lbfi-entete {{ display: flex; align-items: center; gap: 14px; }}
+  .lbfi-entete img {{ height: 34px; display: block; }}
+  .lbfi-entete .lbfi-titre {{ font-size: 1.25rem; font-weight: 700; color: #2B2B2A; line-height: 1.2; }}
+  .lbfi-entete .lbfi-trait {{ width: 4px; align-self: stretch; background: {VERT_LBFI}; border-radius: 2px; }}
+  .lbfi-fraicheur {{ text-align: right; color: {GRAPHITE_LBFI}; font-size: .85rem; padding-top: .55rem; }}
+
+  /* Menu des pages, présenté comme des onglets */
+  /* (Streamlit met déjà la page courante en gras sur fond grisé) */
+  [data-testid="stPageLink-NavLink"] {{ justify-content: center; border-radius: 8px; }}
+  .st-key-menu_pages {{ border-bottom: 1px solid #E4E5E0; padding-bottom: .3rem; margin-bottom: .6rem; }}
+
+  /* Titre de page */
+  .lbfi-page h2 {{ margin: .2rem 0 0 0; padding: 0; font-size: 1.55rem; }}
+  .lbfi-page p {{ color: {GRAPHITE_LBFI}; margin: .1rem 0 .6rem 0; font-size: .92rem; }}
 
   /* Indicateurs en cartes */
   [data-testid="stMetric"] {{
@@ -1090,16 +1085,8 @@ def injecter_style() -> None:
     overflow: visible !important; text-overflow: clip !important;
   }}
 
-  /* Onglets */
-  .stTabs [data-baseweb="tab-list"] {{ gap: 6px; border-bottom: 1px solid #E4E5E0; }}
-  .stTabs [data-baseweb="tab"] {{ padding: 10px 16px; border-radius: 8px 8px 0 0; font-weight: 600; }}
-  .stTabs [aria-selected="true"] {{ background: #F1F6E0; color: {VERT_LBFI_FONCE}; }}
-  .stTabs [data-baseweb="tab-highlight"] {{ background-color: {VERT_LBFI}; }}
-
   /* Titres de section */
   h3 {{ color: #2B2B2A; }}
-  [data-testid="stSidebar"] h2 {{ font-size: 1.05rem; color: {GRAPHITE_LBFI}; }}
-  .block-container {{ padding-top: 2.2rem; }}
 
   /* Ancres "Pointages suspects" : laisser un peu d'air au-dessus après le saut */
   [id^="pointages-suspects"] {{ scroll-margin-top: 4rem; }}
@@ -1107,52 +1094,184 @@ def injecter_style() -> None:
 """, unsafe_allow_html=True)
 
 
-def en_tete_lbfi() -> None:
-    fond = _image_base64("bandeau_presses.jpg")
+def en_tete_compacte() -> None:
+    """Une seule bande : logo, titre, heure des données, Actualiser, puis le menu des pages."""
     logo = _image_base64("logo_lbfi.png")
-    style_fond = f"background-image: url('{fond}');" if fond else f"background: {GRAPHITE_LBFI};"
-    logo_html = f'<div class="lbfi-logo"><img src="{logo}" alt="LBFI International"></div>' if logo else ""
-    st.markdown(f"""
-<div class="lbfi-hero" style="{style_fond}">
-  <div>
-    <div class="lbfi-trait"></div>
-    <h1>Suivi des temps de production</h1>
-    <p>Usine LBFI — pointages des opérateurs et ordres de fabrication</p>
-  </div>
-  {logo_html}
-</div>""", unsafe_allow_html=True)
-
-
-def bandeau(image: str, titre: str, sous_titre: str = "") -> None:
-    fond = _image_base64(image)
-    style_fond = f"background-image: url('{fond}');" if fond else f"background: {GRAPHITE_LBFI};"
-    st.markdown(f"""
-<div class="lbfi-bandeau" style="{style_fond}">
-  <h2>{titre}</h2>{f'<p>{sous_titre}</p>' if sous_titre else ''}
-</div>""", unsafe_allow_html=True)
-
-
-injecter_style()
-_logo = DOSSIER_ASSETS / "logo_lbfi.png"
-if _logo.exists():
-    try:
-        st.logo(str(_logo), size="large")
-    except TypeError:  # anciennes versions de Streamlit
-        st.logo(str(_logo))
-en_tete_lbfi()
-
-with st.sidebar:
-    st.header("📁 Données")
-    st.caption(f"Source : Supabase — actualisation automatique toutes les {DUREE_CACHE_S // 60} min.")
-    if st.button("🔄 Actualiser maintenant", help="Relit immédiatement les données dans Supabase."):
+    logo_html = f'<img src="{logo}" alt="LBFI International">' if logo else ""
+    col_titre, col_fraicheur, col_bouton = st.columns([6, 3, 1.4], vertical_alignment="center")
+    col_titre.markdown(
+        f'<div class="lbfi-entete">{logo_html}<div class="lbfi-trait"></div>'
+        '<div class="lbfi-titre">Suivi des temps de production</div></div>',
+        unsafe_allow_html=True,
+    )
+    col_fraicheur.markdown(
+        f'<div class="lbfi-fraicheur">Données lues le {DONNEES_LUES_LE.strftime("%d/%m à %H:%M")}'
+        f" · relues toutes les {DUREE_CACHE_S // 60} min</div>",
+        unsafe_allow_html=True,
+    )
+    if col_bouton.button("↻ Actualiser", help="Relit immédiatement les données dans Supabase.",
+                         use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
-try:
-    df_pointages, df_of = load_data()
-except Exception as e:
-    st.error(f"Impossible de lire les données Supabase : {e}")
-    st.stop()
+    try:
+        menu = st.container(key="menu_pages")
+    except TypeError:  # Streamlit < 1.42 : pas de clé de conteneur (le menu reste fonctionnel)
+        menu = st.container()
+    with menu:
+        colonnes = st.columns(len(PAGES))
+        for colonne, page in zip(colonnes, PAGES):
+            colonne.page_link(page, use_container_width=True)
+
+
+def titre_page(titre: str, sous_titre: str = "") -> None:
+    """Titre de page sobre (remplace les bandeaux photo)."""
+    st.markdown(
+        f'<div class="lbfi-page"><h2>{titre}</h2>{f"<p>{sous_titre}</p>" if sous_titre else ""}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sélecteur de période commun aux pages Semaine / Mois / Année
+# ---------------------------------------------------------------------------
+# La période choisie est gardée en session (elle survit au changement de page)
+# et recopiée dans l'URL (?semaine=2026-S44) pour pouvoir partager le lien.
+
+NOMS_MOIS_COURTS = ["janv.", "févr.", "mars", "avr.", "mai", "juin",
+                    "juil.", "août", "sept.", "oct.", "nov.", "déc."]
+
+
+def _valeur_initiale(nom: str, options: list, defaut):
+    depuis_url = st.query_params.get(nom)
+    if depuis_url in options:
+        return depuis_url
+    return defaut if defaut in options else options[-1]
+
+
+def selecteur_periode(nom: str, options_croissantes: list, format_option, valeur_actuelle,
+                      libelle_actuel: str, libelles: tuple = ("◀ Précédent", "Suivant ▶")):
+    """◀ · liste · ▶ · bouton « maintenant », comme sur la page Journée.
+
+    `options_croissantes` : identifiants texte du plus ancien au plus récent
+    (ex. "2026-S44"). Renvoie l'identifiant choisi.
+    """
+    cle, cle_widget = f"periode_{nom}", f"_widget_{nom}"
+    if st.session_state.get(cle) not in options_croissantes:
+        st.session_state[cle] = _valeur_initiale(nom, options_croissantes, valeur_actuelle)
+    st.session_state[cle_widget] = st.session_state[cle]
+    position = options_croissantes.index(st.session_state[cle])
+
+    def _decaler(pas: int) -> None:
+        i = options_croissantes.index(st.session_state[cle]) + pas
+        if 0 <= i < len(options_croissantes):
+            st.session_state[cle] = options_croissantes[i]
+
+    def _choisir() -> None:
+        st.session_state[cle] = st.session_state[cle_widget]
+
+    def _revenir_a_maintenant() -> None:
+        st.session_state[cle] = valeur_actuelle if valeur_actuelle in options_croissantes else options_croissantes[-1]
+
+    c1, c2, c3, c4 = st.columns([1, 2.4, 1, 1])
+    c1.button(libelles[0], key=f"prec_{nom}", on_click=_decaler, args=(-1,),
+              disabled=position == 0, use_container_width=True)
+    c2.selectbox(nom, options=options_croissantes[::-1], format_func=format_option, key=cle_widget,
+                 on_change=_choisir, label_visibility="collapsed")
+    c3.button(libelles[1], key=f"suiv_{nom}", on_click=_decaler, args=(1,),
+              disabled=position == len(options_croissantes) - 1, use_container_width=True)
+    c4.button(libelle_actuel, key=f"maintenant_{nom}", on_click=_revenir_a_maintenant,
+              disabled=st.session_state[cle] == valeur_actuelle, use_container_width=True)
+
+    st.query_params[nom] = st.session_state[cle]
+    return st.session_state[cle]
+
+
+def id_semaine(iso_year: int, iso_week: int) -> str:
+    return f"{int(iso_year)}-S{int(iso_week):02d}"
+
+
+def libelle_semaine(identifiant: str) -> str:
+    annee, semaine = identifiant.split("-S")
+    lundi, dimanche = week_bounds(int(annee), int(semaine))
+    if lundi.month == dimanche.month:
+        plage = f"{lundi.day}–{dimanche.day} {NOMS_MOIS_COURTS[dimanche.month - 1]} {dimanche.year}"
+    else:
+        plage = (f"{lundi.day} {NOMS_MOIS_COURTS[lundi.month - 1]} – "
+                 f"{dimanche.day} {NOMS_MOIS_COURTS[dimanche.month - 1]} {dimanche.year}")
+    return f"S{int(semaine):02d} · {plage}" + (" · en cours" if periode_en_cours(lundi, dimanche) else "")
+
+
+def id_mois(annee: int, mois: int) -> str:
+    return f"{int(annee)}-{int(mois):02d}"
+
+
+def libelle_mois(identifiant: str) -> str:
+    annee, mois = (int(x) for x in identifiant.split("-"))
+    return f"{NOMS_MOIS[mois - 1]} {annee}" + (" · en cours" if periode_en_cours(*month_bounds(annee, mois)) else "")
+
+
+# ---------------------------------------------------------------------------
+# Seuil de tolérance de l'écart devisé / réalisé
+# ---------------------------------------------------------------------------
+TOLERANCE_PAR_DEFAUT = 20
+COULEUR_LIGNE_NON_POINTEE = "#e2e3e5"
+COULEUR_LIGNE_DEPASSEMENT = "#f8d7da"
+COULEUR_LIGNE_SOUS_DEVIS = "#d6e9f8"   # bleu : sous le devis (l'orange se lisait comme un avertissement)
+COULEUR_LIGNE_TOLERANCE = "#d4edda"
+
+
+def reglage_tolerance(cle: str) -> int:
+    """Bouton ⚙ qui affiche la valeur active et ouvre le curseur (st.popover)."""
+    if "tolerance_ecart" not in st.session_state:
+        depuis_url = st.query_params.get("tolerance", "")
+        st.session_state["tolerance_ecart"] = (
+            int(depuis_url) if depuis_url.isdigit() and 5 <= int(depuis_url) <= 100 else TOLERANCE_PAR_DEFAUT
+        )
+    cle_widget = f"_widget_tolerance_{cle}"
+    st.session_state[cle_widget] = st.session_state["tolerance_ecart"]
+
+    def _maj() -> None:
+        st.session_state["tolerance_ecart"] = st.session_state[cle_widget]
+
+    with st.popover(f"⚙ Tolérance ±{st.session_state['tolerance_ecart']} %", use_container_width=True):
+        st.slider(
+            "Seuil de tolérance de l'écart (%)", min_value=5, max_value=100, step=5,
+            key=cle_widget, on_change=_maj,
+            help="Écart = (réalisé − devisé) ÷ devisé. Au-delà de ce seuil (en valeur absolue), "
+                 "la ligne est colorée en rouge (dépassement) ou en bleu (sous le devis).",
+        )
+    valeur = st.session_state["tolerance_ecart"]
+    if valeur != TOLERANCE_PAR_DEFAUT:
+        st.query_params["tolerance"] = str(valeur)
+    elif "tolerance" in st.query_params:
+        del st.query_params["tolerance"]
+    return valeur
+
+
+def legende_ecarts(cle: str) -> int:
+    """Légende des couleurs au-dessus du tableau des OF, avec le réglage du seuil à côté."""
+    col_legende, col_reglage = st.columns([5, 1.4], vertical_alignment="center")
+    with col_reglage:
+        seuil = reglage_tolerance(cle)
+    col_legende.caption(
+        f"⬜ Opération non pointée · 🟥 Dépassement de plus de {seuil} % · "
+        f"🟦 Sous le devis de plus de {seuil} % · 🟩 Dans la tolérance (±{seuil} %)"
+    )
+    return seuil
+
+
+def couleur_ecart(realise_h, ecart_pct, seuil) -> str:
+    """Couleur de fond d'une ligne d'OF selon l'écart réalisé / devisé."""
+    if realise_h == 0:
+        return f"background-color: {COULEUR_LIGNE_NON_POINTEE}"
+    if pd.isna(ecart_pct):
+        return ""
+    if ecart_pct > seuil:
+        return f"background-color: {COULEUR_LIGNE_DEPASSEMENT}"
+    if ecart_pct < -seuil:
+        return f"background-color: {COULEUR_LIGNE_SOUS_DEVIS}"
+    return f"background-color: {COULEUR_LIGNE_TOLERANCE}"
 
 
 def message_aucune_cloture(periode: str) -> str:
@@ -1161,55 +1280,64 @@ def message_aucune_cloture(periode: str) -> str:
     suite = f" Dernière clôture enregistrée : {derniere.strftime('%d/%m/%Y')}." if pd.notna(derniere) else ""
     return f"Aucun dossier clôturé {periode}.{suite}"
 
+
 # ---------------------------------------------------------------------------
-# Onglets — Suivi journalier / hebdomadaire / mensuel / Bilan annuel
+# Pages — Journée / Semaine / Mois / Année / Dossiers
+# (chaque page est une fonction ; seule la page affichée est calculée)
 # ---------------------------------------------------------------------------
 
-tab_jour, tab_hebdo, tab_mensuel, tab_annuel = st.tabs(
-    ["🕐 Suivi journalier", "📊 Suivi hebdomadaire", "📆 Suivi mensuel", "📅 Bilan annuel"]
-)
-
-with tab_jour:
-    bandeau("bandeau_jour.jpg", "Suivi journalier", "Qui a pointé quoi, et quand, sur une journée")
+def page_jour():
+    titre_page("Suivi journalier", "Qui a pointé quoi, et quand, sur une journée")
 
     # ---------------------------------------------------------------------------
     # Sélecteur de jour
     # ---------------------------------------------------------------------------
-    maintenant = pd.Timestamp.now(tz=FUSEAU_HORAIRE).tz_localize(None)
+    maintenant = maintenant_local()
     aujourdhui = maintenant.date()
     jours_avec_pointages = sorted(df_pointages["heure_debut"].dropna().dt.date.unique())
 
-    if "jour_sel" not in st.session_state:
-        st.session_state["jour_sel"] = (
-            aujourdhui if (not jours_avec_pointages or aujourdhui in jours_avec_pointages)
-            else jours_avec_pointages[-1]
-        )
+    # Jour choisi gardé en session (il survit au changement de page) et dans l'URL (?jour=2026-11-03)
+    if "periode_jour" not in st.session_state:
+        try:
+            st.session_state["periode_jour"] = date.fromisoformat(st.query_params.get("jour", ""))
+        except ValueError:
+            st.session_state["periode_jour"] = (
+                aujourdhui if (not jours_avec_pointages or aujourdhui in jours_avec_pointages)
+                else jours_avec_pointages[-1]
+            )
+    st.session_state["_widget_jour"] = st.session_state["periode_jour"]
 
     def _aller_au_jour(sens: int) -> None:
         """Passe au jour précédent / suivant ayant des pointages."""
-        courant = st.session_state["jour_sel"]
+        courant = st.session_state["periode_jour"]
         if sens < 0:
             candidats = [j for j in jours_avec_pointages if j < courant]
             if candidats:
-                st.session_state["jour_sel"] = candidats[-1]
+                st.session_state["periode_jour"] = candidats[-1]
         else:
             candidats = [j for j in jours_avec_pointages if j > courant]
             if candidats:
-                st.session_state["jour_sel"] = candidats[0]
+                st.session_state["periode_jour"] = candidats[0]
+
+    def _choisir_jour() -> None:
+        st.session_state["periode_jour"] = st.session_state["_widget_jour"]
 
     def _aller_a_aujourdhui() -> None:
-        st.session_state["jour_sel"] = aujourdhui
+        st.session_state["periode_jour"] = aujourdhui
 
-    nav1, nav2, nav3, nav4 = st.columns([1, 2, 1, 1])
-    nav1.button("◀ Jour précédent", on_click=_aller_au_jour, args=(-1,), use_container_width=True,
+    nav1, nav2, nav3, nav4 = st.columns([1, 2.4, 1, 1])
+    nav1.button("◀ Jour préc.", on_click=_aller_au_jour, args=(-1,), use_container_width=True,
                 help="Jour précédent ayant des pointages")
     with nav2:
-        st.date_input("Jour affiché", key="jour_sel", format="DD/MM/YYYY", label_visibility="collapsed")
-    nav3.button("Jour suivant ▶", on_click=_aller_au_jour, args=(1,), use_container_width=True,
+        st.date_input("Jour affiché", key="_widget_jour", on_change=_choisir_jour,
+                      format="DD/MM/YYYY", label_visibility="collapsed")
+    nav3.button("Jour suiv. ▶", on_click=_aller_au_jour, args=(1,), use_container_width=True,
                 help="Jour suivant ayant des pointages")
-    nav4.button("Aujourd'hui", on_click=_aller_a_aujourdhui, use_container_width=True)
+    nav4.button("Aujourd'hui", on_click=_aller_a_aujourdhui, use_container_width=True,
+                disabled=st.session_state["periode_jour"] == aujourdhui)
 
-    jour = st.session_state["jour_sel"]
+    jour = st.session_state["periode_jour"]
+    st.query_params["jour"] = jour.isoformat()
     est_aujourdhui = jour == aujourdhui
     st.caption(
         f"Journée du **{JOURS_SEMAINE[jour.weekday()]} {jour.strftime('%d/%m/%Y')}**"
@@ -1415,9 +1543,8 @@ with tab_jour:
                                    key="grille_suspects_jour")
 
 
-with tab_hebdo:
-    bandeau("bandeau_semaine.jpg", "Suivi hebdomadaire",
-            "Heures pointées et ordres de fabrication clôturés dans la semaine")
+def page_semaine():
+    titre_page("Suivi hebdomadaire", "Heures pointées et ordres de fabrication clôturés dans la semaine")
 
     # ---------------------------------------------------------------------------
     # Sélecteur de semaine
@@ -1428,20 +1555,17 @@ with tab_hebdo:
         st.warning("Aucune semaine exploitable n'a été trouvée dans la base.")
         st.stop()
 
-    with st.sidebar:
-        st.header("🗓️ Semaine")
-        selected_label = st.selectbox("Sélectionner une semaine", weeks_df["label"])
-
-    selected_row = weeks_df.loc[weeks_df["label"] == selected_label].iloc[0]
-    sel_year, sel_week = int(selected_row["iso_year"]), int(selected_row["iso_week"])
-    monday, sunday = week_bounds(sel_year, sel_week)
-
-    st.caption(f"Semaine sélectionnée : **du {monday.strftime('%d/%m/%Y')} au {sunday.strftime('%d/%m/%Y')}**")
-    st.caption(
-        f"🕒 Dernière date de clôture présente dans la base : "
-        f"**{df_of['date_cloture'].max().strftime('%d/%m/%Y') if df_of['date_cloture'].notna().any() else 'aucune'}** "
-        f"— pour forcer la mise à jour, cliquez sur « Actualiser maintenant »."
+    annee_courante, semaine_courante, _ = maintenant_local().date().isocalendar()
+    semaine_actuelle = id_semaine(annee_courante, semaine_courante)
+    options_semaines = sorted(
+        {id_semaine(a, s) for a, s in zip(weeks_df["iso_year"], weeks_df["iso_week"])} | {semaine_actuelle}
     )
+    semaine_choisie = selecteur_periode(
+        "semaine", options_semaines, libelle_semaine, semaine_actuelle, "Cette semaine",
+        libelles=("◀ Semaine préc.", "Semaine suiv. ▶"),
+    )
+    sel_year, sel_week = (int(x) for x in semaine_choisie.split("-S"))
+    monday, sunday = week_bounds(sel_year, sel_week)
 
     # ---------------------------------------------------------------------------
     # Filtrage des données de la semaine
@@ -1540,15 +1664,6 @@ with tab_hebdo:
     # ---------------------------------------------------------------------------
     # Indicateurs — dossiers clôturés dans la semaine
     # ---------------------------------------------------------------------------
-
-    with st.sidebar:
-        st.header("🎯 Mise en forme")
-        seuil_ecart = st.slider(
-            "Seuil de tolérance de l'écart (%)",
-            min_value=5, max_value=100, value=20, step=5,
-            help="Écart = (temps_opérateurs − temps_devis) / temps_devis. "
-                 "Au-delà de ce seuil (en valeur absolue), la ligne est colorée.",
-        )
 
     st.divider()
     st.subheader("📦 Dossiers clôturés cette semaine")
@@ -1687,166 +1802,17 @@ with tab_hebdo:
                 ecart_pct = table_of["ratio (opérateurs-devis)/devis (%)"]
 
                 def highlight_row(row):
-                    pct = ecart_pct.loc[row.name]
+                    return [couleur_ecart(row["temps_operateurs (h)"], ecart_pct.loc[row.name], seuil_ecart)] * len(row)
 
-                    # Opération non pointée (Gris)
-                    if row["temps_operateurs (h)"] == 0:
-                        return ["background-color: #e2e3e5"] * len(row)
-
-                    if pd.isna(pct):
-                        return [""] * len(row)
-                    if pct > seuil_ecart:
-                        color = "background-color: #f8d7da"  # Rouge : plus long que prévu (dépassement)
-                    elif pct < -seuil_ecart:
-                        color = "background-color: #ffe5b4"  # Orange : plus rapide que prévu (économie)
-                    else:
-                        color = "background-color: #d4edda"  # Vert : dans la tolérance
-                    return [color] * len(row)
-
+                seuil_ecart = legende_ecarts("grille_table_of")
                 ligne_of = afficher_tableau(table_of, key="grille_table_of",
                                             style_ligne=highlight_row, selection=True)
                 bouton_detail_pointages(ligne_of, None, key="btn_detail_of_hebdo")
-                st.caption(
-                    "⬜ Opération non pointée (0h) · "
-                    "🟥 Écart trop positif (dépassement d'heures) · "
-                    "🟧 Écart trop négatif (dossier plus rapide que prévu) · "
-                    "🟩 Écart nul ou faible, dans la tolérance."
-                )
             else:
                 st.info("Aucun dossier ne correspond aux critères de recherche sélectionnés.")
         else:
             st.info("Aucun dossier clôturé sur cette semaine.")
 
-
-    # ---------------------------------------------------------------------------
-    # Recherche et Analyse d'un dossier spécifique (Global)
-    # ---------------------------------------------------------------------------
-    st.divider()
-    st.header("🔍 Analyse d'un dossier spécifique")
-    st.markdown("Cette section permet de consulter les détails d'un dossier indépendamment de la semaine sélectionnée (dossiers en cours, anciens, etc.).")
-
-    # 1. Récupérer la liste de tous les dossiers (sans le filtre de la semaine)
-    tous_les_dossiers = sorted(df_of["numero_dossier"].dropna().astype(str).unique().tolist())
-
-    # 2. Sélecteur de dossier
-    dossier_choisi = st.selectbox(
-        "Sélectionnez ou tapez le numéro d'un dossier :",
-        options=[""] + tous_les_dossiers,
-        format_func=lambda x: "Sélectionnez un dossier..." if x == "" else x,
-        help="Vous pouvez taper directement le numéro pour le trouver plus vite."
-    )
-
-    if dossier_choisi != "":
-        # 3. Filtrer les données globales pour ce dossier spécifique
-        spec_of = df_of[df_of["numero_dossier"].astype(str) == dossier_choisi].copy()
-
-        if not spec_of.empty:
-            # En-tête du dossier
-            client_nom = spec_of["client"].iloc[0]
-            st.subheader(f"Dossier : {dossier_choisi} — {client_nom if pd.notna(client_nom) else 'Client inconnu'}")
-
-            # 4. Calcul des indicateurs globaux du dossier
-            devis_total = spec_of["temps_devis_h"].sum()
-            realise_total = spec_of["temps_operateurs_h"].sum()
-            ecart_total = realise_total - devis_total
-
-            c_spec1, c_spec2, c_spec3 = st.columns(3)
-            c_spec1.metric("Heures devisées", fr_heures(devis_total))
-            c_spec2.metric("Heures réalisées", fr_heures(realise_total))
-
-            # Coloration de l'écart : Rouge si on dépasse le devis (>0), Vert si en dessous (<=0)
-            delta_color = "inverse" if ecart_total > 0 else "normal"
-            c_spec3.metric("Écart réalisé − devisé", fr_heures(ecart_total), delta_color=delta_color)
-
-            # 5. Graphique : Temps par poste
-            st.markdown("**Temps par poste**")
-            par_poste_spec = (
-                spec_of.groupby("poste", dropna=False)[["temps_operateurs_h", "temps_devis_h"]]
-                .sum()
-                .rename(columns={"temps_operateurs_h": "Temps réalisé", "temps_devis_h": "Temps devisé"})
-                .sort_values("Temps devisé", ascending=True)
-                .reset_index()
-            )
-            par_poste_spec["poste"] = par_poste_spec["poste"].fillna("Non défini")
-
-            fig_poste_spec = px.bar(
-                par_poste_spec,
-                y="poste",
-                x=["Temps réalisé", "Temps devisé"],
-                orientation="h",
-                barmode="group",
-                labels={"value": "Heures", "poste": "Poste", "variable": ""},
-                color_discrete_map=COLOR_MAP_DEVIS_REALISE,
-            )
-            fig_poste_spec.update_layout(legend_title_text="")
-            st.plotly_chart(fig_poste_spec, use_container_width=True, config=PLOTLY_CONFIG, key=f"bar_spec_{dossier_choisi}")
-
-            # 6. Tableau détaillé par opérations du dossier
-            st.markdown("**Détail des opérations (Ordres de Fabrication) de ce dossier**")
-
-            table_spec_of = spec_of[
-                [
-                    "id",
-                    "created_at",
-                    "numero_devis",
-                    "client",
-                    "reference",
-                    "operation",
-                    "temps_devis_h",
-                    "temps_operateurs_h",
-                ]
-            ].rename(
-                columns={
-                    "temps_devis_h": "temps_devis (h)",
-                    "temps_operateurs_h": "temps_operateurs (h)",
-                }
-            ).sort_values("created_at", ascending=False).reset_index(drop=True)
-
-            table_spec_of["temps_devis (h)"] = table_spec_of["temps_devis (h)"].round(2)
-            table_spec_of["temps_operateurs (h)"] = table_spec_of["temps_operateurs (h)"].round(2)
-
-            # Calculs Delta et Ratio (Inversés pour refléter le réalisé par rapport au devis)
-            table_spec_of["delta (h)"] = (
-                table_spec_of["temps_operateurs (h)"] - table_spec_of["temps_devis (h)"]
-            ).round(2)
-
-            table_spec_of["ratio (opérateurs-devis)/devis (%)"] = (
-                table_spec_of["delta (h)"]
-                / table_spec_of["temps_devis (h)"].replace(0, float("nan"))
-                * 100
-            ).round(1)
-
-            ecart_pct_spec = table_spec_of["ratio (opérateurs-devis)/devis (%)"]
-
-            def highlight_row_spec(row):
-                pct = ecart_pct_spec.loc[row.name]
-
-                # Opération non pointée (Gris)
-                if row["temps_operateurs (h)"] == 0:
-                    return ["background-color: #e2e3e5"] * len(row)
-
-                if pd.isna(pct):
-                    return [""] * len(row)
-                if pct > seuil_ecart:
-                    color = "background-color: #f8d7da"  # Rouge : dépassement
-                elif pct < -seuil_ecart:
-                    color = "background-color: #ffe5b4"  # Orange : sous le devis
-                else:
-                    color = "background-color: #d4edda"  # Vert : dans la tolérance
-                return [color] * len(row)
-
-            ligne_choisie = afficher_tableau(table_spec_of, key="grille_table_spec_of",
-                                             style_ligne=highlight_row_spec, selection=True)
-            bouton_detail_pointages(ligne_choisie, dossier_choisi, key="btn_detail_hebdo")
-            st.caption(
-                "⬜ Opération non pointée (0h) · "
-                "🟥 Écart trop positif (dépassement d'heures) · "
-                "🟧 Écart trop négatif (dossier plus rapide que prévu) · "
-                "🟩 Écart nul ou faible, dans la tolérance."
-            )
-
-        else:
-            st.warning("Ce dossier est introuvable dans la liste globale des ordres de fabrication.")
 
     # ---------------------------------------------------------------------------
     # Pointages suspects de la semaine (bas de page)
@@ -1855,12 +1821,11 @@ with tab_hebdo:
                                key="grille_suspects_semaine")
 
 # ---------------------------------------------------------------------------
-# Onglet — Suivi mensuel
+# Page — Suivi mensuel
 # ---------------------------------------------------------------------------
 
-with tab_mensuel:
-    bandeau("bandeau_mois.jpg", "Suivi mensuel",
-            "Heures pointées et ordres de fabrication clôturés dans le mois")
+def page_mois():
+    titre_page("Suivi mensuel", "Heures pointées et ordres de fabrication clôturés dans le mois")
 
     # ---------------------------------------------------------------------------
     # Sélecteur de mois
@@ -1871,22 +1836,17 @@ with tab_mensuel:
         st.warning("Aucun mois exploitable n'a été trouvé dans la base.")
         st.stop()
 
-    with st.sidebar:
-        st.header("🗓️ Mois")
-        selected_label_mois = st.selectbox(
-            "Sélectionner un mois", months_df["label"], key="select_mois"
-        )
-
-    selected_row_mois = months_df.loc[months_df["label"] == selected_label_mois].iloc[0]
-    sel_year_m, sel_month = int(selected_row_mois["cal_year"]), int(selected_row_mois["cal_month"])
-    premier_jour, dernier_jour = month_bounds(sel_year_m, sel_month)
-
-    st.caption(f"Mois sélectionné : **du {premier_jour.strftime('%d/%m/%Y')} au {dernier_jour.strftime('%d/%m/%Y')}**")
-    st.caption(
-        f"🕒 Dernière date de clôture présente dans la base : "
-        f"**{df_of['date_cloture'].max().strftime('%d/%m/%Y') if df_of['date_cloture'].notna().any() else 'aucune'}** "
-        f"— pour forcer la mise à jour, cliquez sur « Actualiser maintenant »."
+    aujourdhui_m = maintenant_local().date()
+    mois_actuel = id_mois(aujourdhui_m.year, aujourdhui_m.month)
+    options_mois = sorted(
+        {id_mois(a, m) for a, m in zip(months_df["cal_year"], months_df["cal_month"])} | {mois_actuel}
     )
+    mois_choisi = selecteur_periode(
+        "mois", options_mois, libelle_mois, mois_actuel, "Ce mois-ci",
+        libelles=("◀ Mois préc.", "Mois suiv. ▶"),
+    )
+    sel_year_m, sel_month = (int(x) for x in mois_choisi.split("-"))
+    premier_jour, dernier_jour = month_bounds(sel_year_m, sel_month)
 
     # ---------------------------------------------------------------------------
     # Filtrage des données du mois
@@ -2122,91 +2082,83 @@ with tab_mensuel:
                 ecart_pct_m = table_of_m["ratio (opérateurs-devis)/devis (%)"]
 
                 def highlight_row_mensuel(row):
-                    pct = ecart_pct_m.loc[row.name]
+                    return [couleur_ecart(row["temps_operateurs (h)"], ecart_pct_m.loc[row.name], seuil_ecart)] * len(row)
 
-                    # Opération non pointée (Gris)
-                    if row["temps_operateurs (h)"] == 0:
-                        return ["background-color: #e2e3e5"] * len(row)
-
-                    if pd.isna(pct):
-                        return [""] * len(row)
-                    if pct > seuil_ecart:
-                        color = "background-color: #f8d7da"  # Rouge : plus long que prévu (dépassement)
-                    elif pct < -seuil_ecart:
-                        color = "background-color: #ffe5b4"  # Orange : plus rapide que prévu (économie)
-                    else:
-                        color = "background-color: #d4edda"  # Vert : dans la tolérance
-                    return [color] * len(row)
-
+                seuil_ecart = legende_ecarts("grille_table_of_m")
                 ligne_of_m = afficher_tableau(table_of_m, key="grille_table_of_m",
                                               style_ligne=highlight_row_mensuel, selection=True)
                 bouton_detail_pointages(ligne_of_m, None, key="btn_detail_of_mensuel")
-                st.caption(
-                    "⬜ Opération non pointée (0h) · "
-                    "🟥 Écart trop positif (dépassement d'heures) · "
-                    "🟧 Écart trop négatif (dossier plus rapide que prévu) · "
-                    "🟩 Écart nul ou faible, dans la tolérance."
-                )
             else:
                 st.info("Aucun dossier ne correspond aux critères de recherche sélectionnés.")
         else:
             st.info("Aucun dossier clôturé sur ce mois.")
 
 
-    # ---------------------------------------------------------------------------
-    # Recherche et Analyse d'un dossier spécifique (Global)
-    # ---------------------------------------------------------------------------
-    st.divider()
-    st.header("🔍 Analyse d'un dossier spécifique")
-    st.markdown("Cette section permet de consulter les détails d'un dossier indépendamment du mois sélectionné (dossiers en cours, anciens, etc.).")
+# ---------------------------------------------------------------------------
+# Page — Dossiers
+# ---------------------------------------------------------------------------
 
-    # 1. Récupérer la liste de tous les dossiers (sans le filtre du mois)
-    tous_les_dossiers_m = sorted(df_of["numero_dossier"].dropna().astype(str).unique().tolist())
+def page_dossiers():
+    titre_page("Dossiers", "Devisé et réalisé d'un dossier, toutes périodes confondues (en cours, clôturé, ancien)")
 
-    # 2. Sélecteur de dossier
-    dossier_choisi_m = st.selectbox(
-        "Sélectionnez ou tapez le numéro d'un dossier :",
-        options=[""] + tous_les_dossiers_m,
-        format_func=lambda x: "Sélectionnez un dossier..." if x == "" else x,
+    tous_les_dossiers = sorted(df_of["numero_dossier"].dropna().astype(str).unique().tolist())
+
+    # Dossier choisi gardé en session et dans l'URL (?dossier=BC2600738) pour partager le lien
+    if st.session_state.get("dossier_choisi") not in tous_les_dossiers:
+        depuis_url = st.query_params.get("dossier", "")
+        st.session_state["dossier_choisi"] = depuis_url if depuis_url in tous_les_dossiers else ""
+    st.session_state["_widget_dossier"] = st.session_state["dossier_choisi"]
+
+    def _choisir_dossier() -> None:
+        st.session_state["dossier_choisi"] = st.session_state["_widget_dossier"]
+
+    dossier_choisi = st.selectbox(
+        "Numéro de dossier",
+        options=[""] + tous_les_dossiers,
+        format_func=lambda x: "Tapez ou choisissez un numéro de dossier…" if x == "" else x,
+        key="_widget_dossier", on_change=_choisir_dossier,
         help="Vous pouvez taper directement le numéro pour le trouver plus vite.",
-        key="select_dossier_mensuel",
     )
+    if dossier_choisi:
+        st.query_params["dossier"] = dossier_choisi
+    elif "dossier" in st.query_params:
+        del st.query_params["dossier"]
 
-    if dossier_choisi_m != "":
+    if dossier_choisi != "":
         # 3. Filtrer les données globales pour ce dossier spécifique
-        spec_of_m = df_of[df_of["numero_dossier"].astype(str) == dossier_choisi_m].copy()
+        spec_of = df_of[df_of["numero_dossier"].astype(str) == dossier_choisi].copy()
 
-        if not spec_of_m.empty:
+        if not spec_of.empty:
             # En-tête du dossier
-            client_nom_m = spec_of_m["client"].iloc[0]
-            st.subheader(f"Dossier : {dossier_choisi_m} — {client_nom_m if pd.notna(client_nom_m) else 'Client inconnu'}")
+            client_nom = spec_of["client"].iloc[0]
+            st.subheader(f"Dossier : {dossier_choisi} — {client_nom if pd.notna(client_nom) else 'Client inconnu'}")
 
             # 4. Calcul des indicateurs globaux du dossier
-            devis_total_m = spec_of_m["temps_devis_h"].sum()
-            realise_total_m = spec_of_m["temps_operateurs_h"].sum()
-            ecart_total_m = realise_total_m - devis_total_m
+            devis_total = spec_of["temps_devis_h"].sum()
+            realise_total = spec_of["temps_operateurs_h"].sum()
+            ecart_total = realise_total - devis_total
 
-            c_spec1_m, c_spec2_m, c_spec3_m = st.columns(3)
-            c_spec1_m.metric("Heures devisées", fr_heures(devis_total_m))
-            c_spec2_m.metric("Heures réalisées", fr_heures(realise_total_m))
+            c_spec1, c_spec2, c_spec3 = st.columns(3)
+            c_spec1.metric("Heures devisées", fr_heures(devis_total))
+            c_spec2.metric("Heures réalisées", fr_heures(realise_total))
 
             # Coloration de l'écart : Rouge si on dépasse le devis (>0), Vert si en dessous (<=0)
-            delta_color_m = "inverse" if ecart_total_m > 0 else "normal"
-            c_spec3_m.metric("Écart réalisé − devisé", fr_heures(ecart_total_m), delta_color=delta_color_m)
+            delta_color = "inverse" if ecart_total > 0 else "normal"
+            c_spec3.metric("Écart réalisé − devisé", fr_heures(ecart_total), delta_color=delta_color)
 
             # 5. Graphique : Temps par poste
             st.markdown("**Temps par poste**")
-            par_poste_spec_m = (
-                spec_of_m.groupby("poste", dropna=False)[["temps_operateurs_h", "temps_devis_h"]]
+            par_poste_spec = (
+                spec_of.groupby("poste", dropna=False)[["temps_operateurs_h", "temps_devis_h"]]
                 .sum()
                 .rename(columns={"temps_operateurs_h": "Temps réalisé", "temps_devis_h": "Temps devisé"})
                 .sort_values("Temps devisé", ascending=True)
                 .reset_index()
             )
-            par_poste_spec_m["poste"] = par_poste_spec_m["poste"].fillna("Non défini")
+            par_poste_spec["poste"] = par_poste_spec["poste"].fillna("Non défini")
 
-            fig_poste_spec_m = px.bar(
-                par_poste_spec_m,
+            fig_poste_spec = px.bar(
+                par_poste_spec,
                 y="poste",
                 x=["Temps réalisé", "Temps devisé"],
                 orientation="h",
@@ -2214,13 +2166,13 @@ with tab_mensuel:
                 labels={"value": "Heures", "poste": "Poste", "variable": ""},
                 color_discrete_map=COLOR_MAP_DEVIS_REALISE,
             )
-            fig_poste_spec_m.update_layout(legend_title_text="")
-            st.plotly_chart(fig_poste_spec_m, use_container_width=True, config=PLOTLY_CONFIG, key=f"bar_spec_mensuel_{dossier_choisi_m}")
+            fig_poste_spec.update_layout(legend_title_text="")
+            st.plotly_chart(fig_poste_spec, use_container_width=True, config=PLOTLY_CONFIG, key=f"bar_spec_{dossier_choisi}")
 
             # 6. Tableau détaillé par opérations du dossier
             st.markdown("**Détail des opérations (Ordres de Fabrication) de ce dossier**")
 
-            table_spec_of_m = spec_of_m[
+            table_spec_of = spec_of[
                 [
                     "id",
                     "created_at",
@@ -2238,59 +2190,40 @@ with tab_mensuel:
                 }
             ).sort_values("created_at", ascending=False).reset_index(drop=True)
 
-            table_spec_of_m["temps_devis (h)"] = table_spec_of_m["temps_devis (h)"].round(2)
-            table_spec_of_m["temps_operateurs (h)"] = table_spec_of_m["temps_operateurs (h)"].round(2)
+            table_spec_of["temps_devis (h)"] = table_spec_of["temps_devis (h)"].round(2)
+            table_spec_of["temps_operateurs (h)"] = table_spec_of["temps_operateurs (h)"].round(2)
 
             # Calculs Delta et Ratio (Inversés pour refléter le réalisé par rapport au devis)
-            table_spec_of_m["delta (h)"] = (
-                table_spec_of_m["temps_operateurs (h)"] - table_spec_of_m["temps_devis (h)"]
+            table_spec_of["delta (h)"] = (
+                table_spec_of["temps_operateurs (h)"] - table_spec_of["temps_devis (h)"]
             ).round(2)
 
-            table_spec_of_m["ratio (opérateurs-devis)/devis (%)"] = (
-                table_spec_of_m["delta (h)"]
-                / table_spec_of_m["temps_devis (h)"].replace(0, float("nan"))
+            table_spec_of["ratio (opérateurs-devis)/devis (%)"] = (
+                table_spec_of["delta (h)"]
+                / table_spec_of["temps_devis (h)"].replace(0, float("nan"))
                 * 100
             ).round(1)
 
-            ecart_pct_spec_m = table_spec_of_m["ratio (opérateurs-devis)/devis (%)"]
+            ecart_pct_spec = table_spec_of["ratio (opérateurs-devis)/devis (%)"]
 
-            def highlight_row_spec_mensuel(row):
-                pct = ecart_pct_spec_m.loc[row.name]
+            def highlight_row_spec(row):
+                return [couleur_ecart(row["temps_operateurs (h)"], ecart_pct_spec.loc[row.name], seuil_ecart)] * len(row)
 
-                # Opération non pointée (Gris)
-                if row["temps_operateurs (h)"] == 0:
-                    return ["background-color: #e2e3e5"] * len(row)
-
-                if pd.isna(pct):
-                    return [""] * len(row)
-                if pct > seuil_ecart:
-                    color = "background-color: #f8d7da"  # Rouge : dépassement
-                elif pct < -seuil_ecart:
-                    color = "background-color: #ffe5b4"  # Orange : sous le devis
-                else:
-                    color = "background-color: #d4edda"  # Vert : dans la tolérance
-                return [color] * len(row)
-
-            ligne_choisie_m = afficher_tableau(table_spec_of_m, key="grille_table_spec_of_m",
-                                               style_ligne=highlight_row_spec_mensuel, selection=True)
-            bouton_detail_pointages(ligne_choisie_m, dossier_choisi_m, key="btn_detail_mensuel")
-            st.caption(
-                "⬜ Opération non pointée (0h) · "
-                "🟥 Écart trop positif (dépassement d'heures) · "
-                "🟧 Écart trop négatif (dossier plus rapide que prévu) · "
-                "🟩 Écart nul ou faible, dans la tolérance."
-            )
+            seuil_ecart = legende_ecarts("grille_table_spec_of")
+            ligne_choisie = afficher_tableau(table_spec_of, key="grille_table_spec_of",
+                                             style_ligne=highlight_row_spec, selection=True)
+            bouton_detail_pointages(ligne_choisie, dossier_choisi, key="btn_detail_hebdo")
 
         else:
             st.warning("Ce dossier est introuvable dans la liste globale des ordres de fabrication.")
 
+
 # ---------------------------------------------------------------------------
-# Onglet — Bilan annuel
+# Page — Bilan annuel
 # ---------------------------------------------------------------------------
 
-with tab_annuel:
-    bandeau("bandeau_annee.jpg", "Bilan annuel", "Devisé, réalisé et évolution sur l'année")
-    st.header("📅 Bilan annuel")
+def page_annee():
+    titre_page("Bilan annuel", "Devisé, réalisé et évolution sur l'année")
 
     # -- Sélecteur d'année -------------------------------------------------
     annees_pointages = df_pointages["iso_year"].dropna().astype(int).unique().tolist()
@@ -2301,12 +2234,12 @@ with tab_annuel:
         st.warning("Aucune année exploitable n'a été trouvée dans la base.")
         st.stop()
 
-    annee_defaut = 2026 if 2026 in annees_disponibles else annees_disponibles[0]
-    annee_choisie = st.selectbox(
-        "Année",
-        options=annees_disponibles,
-        index=annees_disponibles.index(annee_defaut),
-    )
+    annee_actuelle = str(maintenant_local().year)
+    options_annees = sorted({str(a) for a in annees_disponibles} | {annee_actuelle})
+    annee_choisie = int(selecteur_periode(
+        "annee", options_annees, lambda a: a + (" · en cours" if a == annee_actuelle else ""),
+        annee_actuelle, "Cette année", libelles=("◀ Année préc.", "Année suiv. ▶"),
+    ))
 
     st.caption(
         "ℹ️ Les indicateurs « devisé » / « attribué » et les graphiques par poste / par opération "
@@ -2756,3 +2689,27 @@ with tab_annuel:
             )
     else:
         st.info("Aucun pointage sur l'année sélectionnée.")
+
+
+# ---------------------------------------------------------------------------
+# Démarrage : données, en-tête commun, puis la page choisie
+# ---------------------------------------------------------------------------
+
+injecter_style()
+
+try:
+    df_pointages, df_of, DONNEES_LUES_LE = load_data()
+except Exception as e:
+    st.error(f"Impossible de lire les données Supabase : {e}")
+    st.stop()
+
+PAGES = [
+    st.Page(page_jour, title="Journée", icon="🕐", url_path="journee", default=True),
+    st.Page(page_semaine, title="Semaine", icon="📊", url_path="semaine"),
+    st.Page(page_mois, title="Mois", icon="📆", url_path="mois"),
+    st.Page(page_annee, title="Année", icon="📅", url_path="annee"),
+    st.Page(page_dossiers, title="Dossiers", icon="🔍", url_path="dossiers"),
+]
+page_courante = st.navigation(PAGES, position="hidden")  # menu dessiné par en_tete_compacte()
+en_tete_compacte()
+page_courante.run()
