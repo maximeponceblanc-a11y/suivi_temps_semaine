@@ -539,14 +539,36 @@ HORAIRES_ATELIER_TEXTE = "lun.–ven. 5h00–16h30, sam. 6h00–12h00, fermé le
 TOLERANCE_HORAIRES_MIN = 0           # marge tolérée autour des horaires d'ouverture (minutes)
 SEUIL_POINTAGE_TROP_LONG_H = 12      # un pointage de plus de 12 h est suspect
 
+# Opérateurs qui conduisent plusieurs machines en parallèle (machines numériques qui
+# tournent seules) : pour eux, deux opérations qui se chevauchent sont normales et ne
+# sont pas signalées. Noms comparés sans tenir compte des accents, majuscules et tirets.
+OPERATEURS_TRAVAIL_EN_PARALLELE = ["Ana-Paula LARREY"]
+
+
+def _nom_normalise(nom) -> str:
+    """"Ana-Paula LARREY" -> "ana paula larrey" (sans accents, tirets ni majuscules)."""
+    import unicodedata
+    texte = unicodedata.normalize("NFKD", str(nom)).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z]+", " ", texte.lower()).strip()
+
+
+_NOMS_TRAVAIL_EN_PARALLELE = [_nom_normalise(n) for n in OPERATEURS_TRAVAIL_EN_PARALLELE]
+
+
+def travaille_en_parallele(libelle_operateur) -> bool:
+    """True si l'opérateur fait partie de OPERATEURS_TRAVAIL_EN_PARALLELE."""
+    nom = _nom_normalise(libelle_operateur)
+    return any(n and n in nom for n in _NOMS_TRAVAIL_EN_PARALLELE)
+
 
 def marquer_pointages_suspects(df: pd.DataFrame, aujourdhui: pd.Timestamp) -> pd.Series:
     """Renvoie, pour chaque pointage, la liste des motifs de suspicion (texte, "" si aucun).
 
     Un pointage est suspect s'il :
       - dure plus de SEUIL_POINTAGE_TROP_LONG_H heures ;
+      - finit avant d'avoir commencé (durée négative) ;
       - s'étale sur plusieurs jours (ou n'est toujours pas clôturé un jour suivant) ;
-      - chevauche un autre pointage du même opérateur ;
+      - chevauche un autre pointage du même opérateur (sauf OPERATEURS_TRAVAIL_EN_PARALLELE) ;
       - a lieu, même en partie, en dehors des horaires d'ouverture de l'atelier.
     """
     debut = df["heure_debut"]
@@ -563,6 +585,9 @@ def marquer_pointages_suspects(df: pd.DataFrame, aujourdhui: pd.Timestamp) -> pd
         [df["Durée h"], (fin_eff - debut).dt.total_seconds() / 3600], axis=1
     ).max(axis=1)
     regles.append((duree_h > SEUIL_POINTAGE_TROP_LONG_H, f"Durée > {SEUIL_POINTAGE_TROP_LONG_H} h"))
+
+    # 1 bis. Fin avant le début : durée négative, qui retire des heures aux totaux
+    regles.append((fin_eff.notna() & (fin_eff < debut), "Fin avant le début (durée négative)"))
 
     # 2. Pointage sur plusieurs jours
     regles.append((fin_eff.notna() & (fin_eff.dt.normalize() > jour_debut), "S'étale sur plusieurs jours"))
@@ -604,9 +629,12 @@ def _textes_chevauchements(df: pd.DataFrame, fin_eff: pd.Series) -> pd.Series:
 
     Balayage chronologique par opérateur : on garde les pointages encore « ouverts »
     (fin > début du pointage examiné) ; chacun d'eux est en conflit avec lui.
+    Les opérateurs de OPERATEURS_TRAVAIL_EN_PARALLELE ne sont pas contrôlés.
     """
     partenaires: dict = {i: [] for i in df.index}
     valides = df["heure_debut"].notna() & df["id_operateur"].notna()
+    if "operateur" in df.columns:
+        valides &= ~df["operateur"].map(travaille_en_parallele).astype(bool)
     donnees = df.loc[valides, ["id_operateur", "heure_debut"]].assign(_fin=fin_eff[valides])
     for _, groupe in donnees.sort_values("heure_debut").groupby("id_operateur", sort=False):
         actifs = []  # (fin, index)
@@ -851,9 +879,11 @@ def afficher_tableau(df: pd.DataFrame, key: str, style_ligne=None, hauteur_max: 
 
 
 CRITERES_SUSPECTS_TEXTE = (
-    f"Critères : pointage de plus de {SEUIL_POINTAGE_TROP_LONG_H} h, pointage qui s'étale sur "
+    f"Critères : pointage de plus de {SEUIL_POINTAGE_TROP_LONG_H} h, fin avant le début (durée négative), "
+    "pointage qui s'étale sur "
     "plusieurs jours (ou toujours ouvert un jour suivant), chevauchement avec un autre pointage "
-    "du même opérateur, ou pointage (même en partie) en dehors des horaires d'ouverture de "
+    f"du même opérateur (sauf {', '.join(OPERATEURS_TRAVAIL_EN_PARALLELE)}, qui conduit plusieurs machines "
+    "en parallèle), ou pointage (même en partie) en dehors des horaires d'ouverture de "
     f"l'atelier ({HORAIRES_ATELIER_TEXTE})."
 )
 
@@ -990,7 +1020,7 @@ def fenetre_detail_pointages(numero_dossier: str, operation: str, devis_h: float
               .agg(heures=("Durée h", "sum"), pointages=("id", "count"),
                    premier=("heure_debut", "min"), dernier=("heure_debut", "max"))
               .sort_values("heures", ascending=False).reset_index())
-    par_op["heures"] = par_op["heures"].round(2)
+    par_op["heures"] = par_op["heures"].map(lambda h: fr_nombre(h, 2))
     par_op["premier"] = par_op["premier"].dt.strftime("%d/%m/%Y")
     par_op["dernier"] = par_op["dernier"].dt.strftime("%d/%m/%Y")
     st.dataframe(
@@ -1052,7 +1082,8 @@ def injecter_style() -> None:
   /* Pas de barre latérale : tous les réglages sont dans les pages */
   [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"],
   [data-testid="collapsedControl"] {{ display: none !important; }}
-  .block-container {{ padding-top: 1.2rem; }}
+  /* La barre d'outils Streamlit (Fork, GitHub, ⋮) fait 60 px de haut : on laisse la place */
+  .block-container {{ padding-top: 4.4rem; }}
 
   /* En-tête compact */
   .lbfi-entete {{ display: flex; align-items: center; gap: 14px; }}
@@ -1383,7 +1414,8 @@ def page_jour():
             fraction_journee_ecoulee(maintenant) if est_aujourdhui else (1.0 if jour.weekday() < 5 else 0.0)
         )
         if est_aujourdhui and 0 < heures_possibles < TAUX_HORAIRE_JOUR:
-            valeur_moyenne = f"{fr_heures(moyenne_op)} / {fr_heures(heures_possibles)}"
+            valeur_moyenne = fr_heures(moyenne_op)
+            sous_texte_moyenne = f"sur {fr_heures(heures_possibles)} théoriques écoulées"
             aide_moyenne = (
                 f"Heures pointées par opérateur depuis le début de la journée, comparées aux "
                 f"{fr_heures(heures_possibles)} théoriques déjà écoulées "
@@ -1392,12 +1424,15 @@ def page_jour():
             )
         else:
             valeur_moyenne = fr_heures(moyenne_op)
+            sous_texte_moyenne = f"sur {fr_heures(TAUX_HORAIRE_JOUR)} théoriques" if heures_possibles else ""
             aide_moyenne = f"Heures pointées par opérateur, à comparer aux {fr_heures(TAUX_HORAIRE_JOUR)} théoriques d'une journée."
 
         k1.metric("Opérateurs", f"{nb_op_jour}", help="Opérateurs ayant pointé au moins une fois ce jour-là.")
         k2.metric("Heures pointées", fr_heures(heures_jour),
                   help="Somme des durées des pointages de la journée (pointages en cours inclus jusqu'à maintenant).")
         k3.metric("Moy. / opérateur", valeur_moyenne, help=aide_moyenne)
+        if sous_texte_moyenne:
+            k3.caption(sous_texte_moyenne)
         k4.metric("Dossiers", f"{pointages_jour['ordre_fabrication'].nunique()}",
                   help="Dossiers sur lesquels au moins un pointage a été fait ce jour-là.")
         k5.metric("Non clôturés", f"{nb_en_cours}",
@@ -2142,9 +2177,15 @@ def page_dossiers():
             c_spec1.metric("Heures devisées", fr_heures(devis_total))
             c_spec2.metric("Heures réalisées", fr_heures(realise_total))
 
-            # Coloration de l'écart : Rouge si on dépasse le devis (>0), Vert si en dessous (<=0)
-            delta_color = "inverse" if ecart_total > 0 else "normal"
-            c_spec3.metric("Écart réalisé − devisé", fr_heures(ecart_total), delta_color=delta_color)
+            # Écart en % sous la valeur : rouge si dépassement du devis, vert sinon
+            ecart_pct_total = ecart_total / devis_total if devis_total else float("nan")
+            c_spec3.metric(
+                "Écart réalisé − devisé",
+                fr_heures(ecart_total),
+                delta=fr_pct(ecart_pct_total, 0, signe=True) if pd.notna(ecart_pct_total) else None,
+                delta_color="inverse",
+                help="Positif (rouge) : plus d'heures réalisées que devisées. Négatif (vert) : gain de temps.",
+            )
 
             # 5. Graphique : Temps par poste
             st.markdown("**Temps par poste**")
@@ -2704,7 +2745,7 @@ except Exception as e:
     st.stop()
 
 PAGES = [
-    st.Page(page_jour, title="Journée", icon="🕐", url_path="journee", default=True),
+    st.Page(page_jour, title="Journée", icon="🕐", default=True),  # page d'accueil, à la racine du site
     st.Page(page_semaine, title="Semaine", icon="📊", url_path="semaine"),
     st.Page(page_mois, title="Mois", icon="📆", url_path="mois"),
     st.Page(page_annee, title="Année", icon="📅", url_path="annee"),
