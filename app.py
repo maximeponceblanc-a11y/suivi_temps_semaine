@@ -181,6 +181,11 @@ def load_data():
     # colonne "operateur" lisible pour l'affichage.
     df_pointages["operateur"] = build_operateur_labels(df_pointages["id_operateur"])
 
+    # --- Pointages suspects (calculés sur l'ensemble des pointages, pour que les
+    # chevauchements soient détectés même entre deux semaines / deux jours) -----
+    aujourdhui_ts = pd.Timestamp.now(tz=FUSEAU_HORAIRE).tz_localize(None).normalize()
+    df_pointages["motifs_suspects"] = marquer_pointages_suspects(df_pointages, aujourdhui_ts)
+
     return df_pointages, df_of
 
 
@@ -398,6 +403,84 @@ def pie_top_n(df: pd.DataFrame, group_col: str, value_col: str, n: int = 12):
 
 
 # ---------------------------------------------------------------------------
+# Pointages suspects (onglets « Suivi journalier » et « Suivi hebdomadaire »)
+# ---------------------------------------------------------------------------
+
+# Horaires d'ouverture de l'atelier : jour (0 = lundi … 6 = dimanche) ->
+# (ouverture, fermeture) en heures décimales. Jour absent = atelier fermé.
+HORAIRES_ATELIER = {
+    0: (5.0, 16.5),   # lundi    5h00 – 16h30
+    1: (5.0, 16.5),   # mardi
+    2: (5.0, 16.5),   # mercredi
+    3: (5.0, 16.5),   # jeudi
+    4: (5.0, 16.5),   # vendredi
+    5: (6.0, 12.0),   # samedi   6h00 – 12h00
+}                     # dimanche : fermé
+HORAIRES_ATELIER_TEXTE = "lun.–ven. 5h00–16h30, sam. 6h00–12h00, fermé le dimanche"
+TOLERANCE_HORAIRES_MIN = 0           # marge tolérée autour des horaires d'ouverture (minutes)
+SEUIL_POINTAGE_TROP_LONG_H = 12      # un pointage de plus de 12 h est suspect
+
+
+def marquer_pointages_suspects(df: pd.DataFrame, aujourdhui: pd.Timestamp) -> pd.Series:
+    """Renvoie, pour chaque pointage, la liste des motifs de suspicion (texte, "" si aucun).
+
+    Un pointage est suspect s'il :
+      - dure plus de SEUIL_POINTAGE_TROP_LONG_H heures ;
+      - s'étale sur plusieurs jours (ou n'est toujours pas clôturé un jour suivant) ;
+      - chevauche un autre pointage du même opérateur ;
+      - a lieu, même en partie, en dehors des horaires d'ouverture de l'atelier.
+    """
+    debut = df["heure_debut"]
+    fin = df["heure_fin"]
+    # Fin "effective" : heure de fin, sinon début + durée enregistrée (si > 0)
+    duree_ms = df["duree"].where(df["duree"] > 0)
+    fin_eff = fin.fillna(debut + pd.to_timedelta(duree_ms, unit="ms"))
+    jour_debut = debut.dt.normalize()
+
+    regles = []
+
+    # 1. Pointage trop long
+    duree_h = pd.concat(
+        [df["Durée h"], (fin_eff - debut).dt.total_seconds() / 3600], axis=1
+    ).max(axis=1)
+    regles.append((duree_h > SEUIL_POINTAGE_TROP_LONG_H, f"Durée > {SEUIL_POINTAGE_TROP_LONG_H} h"))
+
+    # 2. Pointage sur plusieurs jours
+    regles.append((fin_eff.notna() & (fin_eff.dt.normalize() > jour_debut), "S'étale sur plusieurs jours"))
+    regles.append((fin_eff.isna() & (jour_debut < aujourdhui),
+                   "Non clôturé depuis un jour précédent"))
+
+    # 3. Chevauchement avec un autre pointage du même opérateur
+    ordre = df.loc[debut.notna() & df["id_operateur"].notna()].sort_values(["id_operateur", "heure_debut"])
+    groupe = ordre["id_operateur"]
+    fin_ordre = fin_eff.loc[ordre.index]
+    fin_max_precedents = fin_ordre.groupby(groupe).shift().groupby(groupe).cummax()
+    debut_suivant = ordre["heure_debut"].groupby(groupe).shift(-1)
+    chevauche = (ordre["heure_debut"] < fin_max_precedents) | (debut_suivant < fin_ordre)
+    regles.append((chevauche.reindex(df.index, fill_value=False),
+                   "Chevauche un autre pointage de l'opérateur"))
+
+    # 4. En dehors des horaires d'ouverture de l'atelier
+    jour_semaine = debut.dt.weekday
+    tolerance = pd.Timedelta(minutes=TOLERANCE_HORAIRES_MIN)
+    ouverture = jour_debut + pd.to_timedelta(
+        jour_semaine.map({j: h[0] for j, h in HORAIRES_ATELIER.items()}), unit="h") - tolerance
+    fermeture = jour_debut + pd.to_timedelta(
+        jour_semaine.map({j: h[1] for j, h in HORAIRES_ATELIER.items()}), unit="h") + tolerance
+    atelier_ferme = debut.notna() & ouverture.isna()
+    regles.append((atelier_ferme, "Atelier fermé ce jour-là"))
+    regles.append((~atelier_ferme & (debut < ouverture), "Début avant l'ouverture"))
+    regles.append((~atelier_ferme & (debut >= fermeture), "Début après la fermeture"))
+    regles.append((~atelier_ferme & (debut < fermeture) & (fin_eff > fermeture), "Fin après la fermeture"))
+
+    motifs = pd.Series("", index=df.index, dtype=object)
+    for masque, texte in regles:
+        m = masque.fillna(False).astype(bool)
+        motifs[m] = np.where(motifs[m] == "", texte, motifs[m] + " · " + texte)
+    return motifs
+
+
+# ---------------------------------------------------------------------------
 # Affichage des tableaux : AgGrid (tri + filtre directement dans les en-têtes)
 # ---------------------------------------------------------------------------
 
@@ -578,6 +661,50 @@ def afficher_tableau(df: pd.DataFrame, key: str, style_ligne=None, hauteur_max: 
         ligne = dict(lignes[0])
     ligne.pop("_couleur", None)
     return ligne
+
+
+CRITERES_SUSPECTS_TEXTE = (
+    f"Critères : pointage de plus de {SEUIL_POINTAGE_TROP_LONG_H} h, pointage qui s'étale sur "
+    "plusieurs jours (ou toujours ouvert un jour suivant), chevauchement avec un autre pointage "
+    "du même opérateur, ou pointage (même en partie) en dehors des horaires d'ouverture de "
+    f"l'atelier ({HORAIRES_ATELIER_TEXTE})."
+)
+
+
+def alerte_pointages_suspects(pointages: pd.DataFrame, periode: str, ancre: str) -> None:
+    """Bandeau d'alerte en haut de page, avec lien vers la liste en bas de page."""
+    nb = int((pointages["motifs_suspects"] != "").sum()) if not pointages.empty else 0
+    if nb:
+        pluriel = "s" if nb > 1 else ""
+        st.error(
+            f"⚠️ Attention, {periode} comporte **{nb} pointage{pluriel} suspect{pluriel}**. "
+            f"[⇒ Voir les pointages suspects](#{ancre})"
+        )
+
+
+def section_pointages_suspects(pointages: pd.DataFrame, periode: str, ancre: str, key: str) -> None:
+    """Liste des pointages suspects, affichée en bas de page."""
+    st.divider()
+    st.subheader("🚨 Pointages suspects", anchor=ancre)
+    st.caption(CRITERES_SUSPECTS_TEXTE)
+
+    suspects = pointages.loc[pointages["motifs_suspects"] != ""] if not pointages.empty else pointages
+    if suspects.empty:
+        st.success(f"Aucun pointage suspect sur {periode}.")
+        return
+
+    # Nombre de pointages par motif
+    nb_par_motif = suspects["motifs_suspects"].str.split(" · ").explode().value_counts()
+    st.markdown(" · ".join(f"**{n}** {motif.lower()}" for motif, n in nb_par_motif.items()))
+
+    table = suspects[
+        ["id", "operateur", "operation", "ordre_fabrication", "heure_debut", "heure_fin",
+         "Durée h", "motifs_suspects"]
+    ].rename(columns={"motifs_suspects": "Alertes"}).sort_values(["operateur", "heure_debut"])
+    table = table.reset_index(drop=True)
+    table["Durée h"] = table["Durée h"].round(2)
+    afficher_tableau(table, key=key,
+                     style_ligne=lambda r: ["background-color: #f8d7da"] * len(r))
 
 
 # ---------------------------------------------------------------------------
@@ -808,6 +935,9 @@ def injecter_style() -> None:
   h3 {{ color: #2B2B2A; }}
   [data-testid="stSidebar"] h2 {{ font-size: 1.05rem; color: {GRAPHITE_LBFI}; }}
   .block-container {{ padding-top: 2.2rem; }}
+
+  /* Ancres "Pointages suspects" : laisser un peu d'air au-dessus après le saut */
+  [id^="pointages-suspects"] {{ scroll-margin-top: 4rem; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -915,6 +1045,9 @@ with tab_jour:
     )
 
     pointages_jour = df_pointages.loc[df_pointages["heure_debut"].dt.date == jour].copy()
+
+    # Alerte "pointages suspects" en haut de page (lien vers la liste en bas de page)
+    alerte_pointages_suspects(pointages_jour, "la journée sélectionnée", "pointages-suspects-jour")
 
     if pointages_jour.empty:
         st.info("Aucun pointage ce jour-là. Utilisez ◀ / ▶ pour passer au jour précédent / suivant ayant des pointages.")
@@ -1086,6 +1219,10 @@ with tab_jour:
         table_jour["Durée h"] = table_jour["Durée h"].round(2)
         afficher_tableau(table_jour, key="grille_pointages_jour")
 
+        # --- Pointages suspects (bas de page) -----------------------------------
+        section_pointages_suspects(pointages_jour, "cette journée", "pointages-suspects-jour",
+                                   key="grille_suspects_jour")
+
 
 with tab_hebdo:
     bandeau("bandeau_semaine.jpg", "Suivi hebdomadaire",
@@ -1121,6 +1258,9 @@ with tab_hebdo:
 
     mask_pointages = (df_pointages["iso_year"] == sel_year) & (df_pointages["iso_week"] == sel_week)
     pointages_semaine = df_pointages.loc[mask_pointages].copy()
+
+    # Alerte "pointages suspects" en haut de page (lien vers la liste en bas de page)
+    alerte_pointages_suspects(pointages_semaine, "la semaine sélectionnée", "pointages-suspects-semaine")
 
     mask_of = (
         (df_of["iso_year"] == sel_year)
@@ -1344,11 +1484,11 @@ with tab_hebdo:
 
             def highlight_row(row):
                 pct = ecart_pct.loc[row.name]
-            
+
                 # Opération non pointée (Gris)
                 if row["temps_operateurs (h)"] == 0:
                     return ["background-color: #e2e3e5"] * len(row)
-                
+
                 if pd.isna(pct):
                     return [""] * len(row)
                 if pct > seuil_ecart:
@@ -1409,7 +1549,7 @@ with tab_hebdo:
             c_spec1, c_spec2, c_spec3 = st.columns(3)
             c_spec1.metric("Temps devisé (Total)", f"{devis_total:.1f} h")
             c_spec2.metric("Temps réalisé (Total)", f"{realise_total:.1f} h")
-        
+
             # Coloration de l'écart : Rouge si on dépasse le devis (>0), Vert si en dessous (<=0)
             delta_color = "inverse" if ecart_total > 0 else "normal"
             c_spec3.metric("Écart (Réalisé - Devis)", f"{ecart_total:.1f} h", delta_color=delta_color)
@@ -1439,7 +1579,7 @@ with tab_hebdo:
 
             # 6. Tableau détaillé par opérations du dossier
             st.markdown("**Détail des opérations (Ordres de Fabrication) de ce dossier**")
-        
+
             table_spec_of = spec_of[
                 [
                     "id",
@@ -1476,11 +1616,11 @@ with tab_hebdo:
 
             def highlight_row_spec(row):
                 pct = ecart_pct_spec.loc[row.name]
-            
+
                 # Opération non pointée (Gris)
                 if row["temps_operateurs (h)"] == 0:
                     return ["background-color: #e2e3e5"] * len(row)
-                
+
                 if pd.isna(pct):
                     return [""] * len(row)
                 if pct > seuil_ecart:
@@ -1503,6 +1643,12 @@ with tab_hebdo:
 
         else:
             st.warning("Ce dossier est introuvable dans la liste globale des ordres de fabrication.")
+
+    # ---------------------------------------------------------------------------
+    # Pointages suspects de la semaine (bas de page)
+    # ---------------------------------------------------------------------------
+    section_pointages_suspects(pointages_semaine, "cette semaine", "pointages-suspects-semaine",
+                               key="grille_suspects_semaine")
 
 # ---------------------------------------------------------------------------
 # Onglet — Suivi mensuel
